@@ -252,6 +252,10 @@ bool kernel_pages_release(
         allocation->mapped_base !=
             allocation->reservation_base +
                 allocation->guard_pages_before *
+                    KRISHNA_PAGE_SIZE ||
+        allocation->reservation_base >
+            UINT64_MAX -
+                reservation_pages *
                     KRISHNA_PAGE_SIZE) {
         return false;
     }
@@ -261,6 +265,46 @@ bool kernel_pages_release(
 
     if (space == NULL) {
         return false;
+    }
+
+    /*
+     * Guard pages belong to the reservation but must never acquire
+     * translations. Refuse to release a damaged descriptor while a
+     * mapping still exists outside the owned usable range.
+     */
+    for (size_t page = 0;
+         page < allocation->guard_pages_before;
+         page++) {
+        uint64_t ignored_physical;
+
+        if (vmm_translate(
+                space,
+                allocation->reservation_base +
+                    page * KRISHNA_PAGE_SIZE,
+                &ignored_physical
+            )) {
+            return false;
+        }
+    }
+
+    uint64_t trailing_guard_base =
+        allocation->mapped_base +
+        allocation->mapped_pages *
+            KRISHNA_PAGE_SIZE;
+
+    for (size_t page = 0;
+         page < allocation->guard_pages_after;
+         page++) {
+        uint64_t ignored_physical;
+
+        if (vmm_translate(
+                space,
+                trailing_guard_base +
+                    page * KRISHNA_PAGE_SIZE,
+                &ignored_physical
+            )) {
+            return false;
+        }
     }
 
     /*

@@ -54,6 +54,12 @@ bool kernel_stack_release(
 {
     if (stack == NULL ||
         stack->allocation.mapped_pages == 0 ||
+        stack->allocation.mapped_pages >
+            UINT64_MAX / KRISHNA_PAGE_SIZE ||
+        stack->stack_bottom >
+            UINT64_MAX -
+                stack->allocation.mapped_pages *
+                    KRISHNA_PAGE_SIZE ||
         stack->stack_bottom !=
             stack->allocation.mapped_base ||
         stack->stack_top !=
