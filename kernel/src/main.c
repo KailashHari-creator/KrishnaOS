@@ -17,7 +17,11 @@
 #include "memory/vmm.h"
 #include "memory/vregion.h"
 #include "memory/heap.h"
+#include "memory/kernel_pages.h"
+#include "memory/kernel_stack.h"
 #include "sync/spinlock.h"
+#include "task/thread.h"
+
 /*
  * Tell Limine which base protocol revision our kernel expects.
  */
@@ -428,6 +432,30 @@ serial_init();
         "[OK] Kernel virtual-region allocator initialized\n"
     );
 
+    if (!kernel_pages_self_test()) {
+        serial_write(
+            "[FAIL] Transactional kernel-page self-test failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Transactional kernel-page self-test passed\n"
+    );
+
+    if (!kernel_stack_self_test()) {
+        serial_write(
+            "[FAIL] Guarded kernel-stack self-test failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Guarded kernel-stack self-test passed\n"
+    );
+
     if (!kheap_init()) {
         serial_write(
             "[FAIL] Kernel heap initialization failed\n"
@@ -447,6 +475,37 @@ serial_init();
     serial_write(
         "[OK] Complete Kernel heap self-test passed\n"
     );
+
+    if (!kernel_thread_system_init()) {
+        serial_write(
+            "[FAIL] Kernel-thread system initialization failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Kernel-thread system initialized\n"
+    );
+
+    if (!kernel_thread_self_test()) {
+        serial_write(
+            "[FAIL] Cooperative kernel-thread self-test failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Cooperative kernel-thread self-test passed\n"
+    );
+
+    if (!kernel_thread_blocking_self_test()) {
+        serial_write("[FAIL] Kernel-thread blocking self-test failed\n");
+        kernel_halt();
+    }
+
+    serial_write("[OK] Kernel-thread blocking self-test passed\n");
 
     struct kheap_statistics heap_statistics;
 
@@ -690,6 +749,8 @@ serial_init();
         bool mouse_available =
             mouse_poll(&mouse_event);
 
+        kernel_thread_yield();
+        
         /*
         * Move the pointer in either interface mode.
         */

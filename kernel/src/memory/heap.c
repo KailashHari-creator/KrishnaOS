@@ -6,10 +6,9 @@
 
 #include <memory.h>
 
+#include "memory/kernel_pages.h"
 #include "memory/layout.h"
-#include "memory/pmm.h"
-#include "memory/vmm.h"
-#include "memory/vregion.h"
+#include "sync/spinlock.h"
 
 /*
  * The initial heap arena contains 16 pages = 64 KiB.
@@ -76,47 +75,17 @@ static uint64_t mapped_page_count;
 static uint64_t allocated_block_count;
 static uint64_t allocated_byte_count;
 
-
-/*
- * Undo partially completed arena construction.
- */
-static void rollback_arena_mapping(
-    uint64_t virtual_base,
-    size_t mapped_pages,
-    size_t reserved_pages
-)
-{
-    struct vmm_address_space *address_space =
-        vmm_kernel_address_space();
-
-    while (mapped_pages > 0) {
-        mapped_pages--;
-
-        uint64_t virtual_address =
-            virtual_base +
-            mapped_pages * KRISHNA_PAGE_SIZE;
-
-        uint64_t physical_address;
-
-        if (vmm_unmap_page(
-                address_space,
-                virtual_address,
-                &physical_address
-            )) {
-            pmm_free_page(physical_address);
-        }
-    }
-
-    kernel_vregion_release(
-        virtual_base,
-        reserved_pages
-    );
-}
+static spinlock_t heap_lock =
+    SPINLOCK_INITIALIZER;
 
 
 /*
- * Reserve virtual space, allocate physical frames and connect them
- * using writable, non-executable mappings.
+ * Create a completely mapped and zero-filled page-backed arena.
+ *
+ * kernel_pages_allocate() owns the PMM/VMM/vregion transaction.
+ * It either succeeds completely or rolls everything back.
+ *
+ * heap_lock must already be held.
  */
 static struct heap_arena *create_arena(
     size_t requested_pages
@@ -124,91 +93,34 @@ static struct heap_arena *create_arena(
 {
     if (requested_pages == 0 ||
         requested_pages >
-            UINT64_MAX / KRISHNA_PAGE_SIZE) {
+            UINT64_MAX /
+                KRISHNA_PAGE_SIZE) {
+        return NULL;
+    }
+
+    struct kernel_page_allocation allocation;
+
+    if (!kernel_pages_allocate(
+            requested_pages,
+            1,
+            VMM_PAGE_WRITABLE |
+                VMM_PAGE_NO_EXECUTE,
+            &allocation
+        )) {
         return NULL;
     }
 
     uint64_t virtual_base =
-        kernel_vregion_reserve(
-            requested_pages,
-            1
-        );
-
-    if (virtual_base ==
-        VREGION_INVALID_ADDRESS) {
-        return NULL;
-    }
-
-    struct vmm_address_space *address_space =
-        vmm_kernel_address_space();
-
-    if (address_space == NULL) {
-        kernel_vregion_release(
-            virtual_base,
-            requested_pages
-        );
-
-        return NULL;
-    }
-
-    size_t mapped_pages = 0;
-
-    for (size_t page = 0;
-         page < requested_pages;
-         page++) {
-        uint64_t physical_address =
-            pmm_allocate_page();
-
-        if (physical_address ==
-            PMM_INVALID_ADDRESS) {
-            rollback_arena_mapping(
-                virtual_base,
-                mapped_pages,
-                requested_pages
-            );
-
-            return NULL;
-        }
-
-        uint64_t virtual_address =
-            virtual_base +
-            page * KRISHNA_PAGE_SIZE;
-
-        if (!vmm_map_page(
-                address_space,
-                virtual_address,
-                physical_address,
-                VMM_PAGE_WRITABLE |
-                VMM_PAGE_NO_EXECUTE
-            )) {
-            pmm_free_page(physical_address);
-
-            rollback_arena_mapping(
-                virtual_base,
-                mapped_pages,
-                requested_pages
-            );
-
-            return NULL;
-        }
-
-        mapped_pages++;
-    }
+        allocation.mapped_base;
 
     uint64_t arena_bytes =
         requested_pages *
-        KRISHNA_PAGE_SIZE;
+            KRISHNA_PAGE_SIZE;
 
     /*
-     * New kernel allocations must never expose stale contents from
-     * a previously used physical frame.
+     * The allocation has already been zero-filled by
+     * kernel_pages_allocate().
      */
-    memset(
-        (void *)(uintptr_t)virtual_base,
-        0,
-        arena_bytes
-    );
-
     struct heap_arena *arena =
         (struct heap_arena *)(uintptr_t)
             virtual_base;
@@ -244,6 +156,7 @@ static struct heap_arena *create_arena(
     arena->first_block = block;
 
     arena_count++;
+
     mapped_page_count +=
         requested_pages;
 
@@ -279,7 +192,7 @@ static bool align_allocation_size(
     return true;
 }
 
-bool kheap_init(void)
+static bool kheap_init_locked(void)
 {
     if (heap_initialized) {
         return false;
@@ -298,8 +211,25 @@ bool kheap_init(void)
     return true;
 }
 
+bool kheap_init(void)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &heap_lock
+        );
 
-void kheap_get_statistics(
+    bool initialized =
+        kheap_init_locked();
+
+    spinlock_unlock_irqrestore(
+        &heap_lock,
+        interrupt_state
+    );
+
+    return initialized;
+}
+
+static void kheap_get_statistics_locked(
     struct kheap_statistics *statistics
 )
 {
@@ -363,6 +293,25 @@ void kheap_get_statistics(
 
         arena = arena->next;
     }
+}
+
+void kheap_get_statistics(
+    struct kheap_statistics *statistics
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &heap_lock
+        );
+
+    kheap_get_statistics_locked(
+        statistics
+    );
+
+    spinlock_unlock_irqrestore(
+        &heap_lock,
+        interrupt_state
+    );
 }
 
 /*
@@ -564,7 +513,7 @@ static bool arena_pages_for_allocation(
 
     return true;
 }
-void *kmalloc(size_t requested_size)
+static void *kmalloc_locked(size_t requested_size)
 {
     if (!heap_initialized ||
         requested_size == 0) {
@@ -619,6 +568,25 @@ void *kmalloc(size_t requested_size)
         required_size
     );
 }
+
+void *kmalloc(size_t requested_size)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &heap_lock
+        );
+
+    void *allocation =
+        kmalloc_locked(requested_size);
+
+    spinlock_unlock_irqrestore(
+        &heap_lock,
+        interrupt_state
+    );
+
+    return allocation;
+}
+
 /*
  * Find the exact block belonging to a payload pointer.
  *
@@ -791,10 +759,11 @@ static bool arena_is_completely_free(
     return block->size == expected_size;
 }
 /*
- * Return a completely unused secondary arena to the VMM, PMM and
- * virtual-region allocator.
+ * Return a completely unused secondary arena.
  *
  * The first arena remains mapped as the permanent bootstrap arena.
+ *
+ * heap_lock must already be held.
  */
 static bool release_empty_arena(
     struct heap_arena *arena
@@ -818,6 +787,10 @@ static bool release_empty_arena(
         return false;
     }
 
+    /*
+     * Save all metadata before releasing the mapping. Once the
+     * first arena page is unmapped, arena itself becomes invalid.
+     */
     uint64_t virtual_base =
         (uint64_t)(uintptr_t)arena;
 
@@ -827,71 +800,52 @@ static bool release_empty_arena(
     struct heap_arena *next_arena =
         arena->next;
 
-    struct vmm_address_space *address_space =
-        vmm_kernel_address_space();
-
-    if (address_space == NULL) {
+    if (pages == 0 ||
+        pages > SIZE_MAX) {
         return false;
     }
 
     /*
-     * Verify every mapping before modifying the arena list.
+     * Heap arenas have no guard pages, so their reservation and
+     * mapped ranges are identical.
      */
-    for (uint64_t page = 0;
-         page < pages;
-         page++) {
-        uint64_t physical_address;
+    struct kernel_page_allocation allocation = {
+        .reservation_base =
+            virtual_base,
 
-        if (!vmm_translate(
-                address_space,
-                virtual_base +
-                    page * KRISHNA_PAGE_SIZE,
-                &physical_address
-            )) {
-            return false;
-        }
-    }
+        .mapped_base =
+            virtual_base,
+
+        .mapped_pages =
+            (size_t)pages,
+
+        .guard_pages_before = 0,
+        .guard_pages_after = 0
+    };
 
     /*
-     * Save everything above before removing the first page, because
-     * the arena header itself will become inaccessible.
+     * Do not access arena after this succeeds: the memory holding
+     * its header has been unmapped.
      */
-    previous->next = next_arena;
-
-    for (uint64_t page = 0;
-         page < pages;
-         page++) {
-        uint64_t physical_address;
-
-        if (!vmm_unmap_page(
-                address_space,
-                virtual_base +
-                    page * KRISHNA_PAGE_SIZE,
-                &physical_address
-            )) {
-            return false;
-        }
-
-        if (!pmm_free_page(
-                physical_address
-            )) {
-            return false;
-        }
-    }
-
-    if (!kernel_vregion_release(
-            virtual_base,
-            (size_t)pages
+    if (!kernel_pages_release(
+            &allocation
         )) {
         return false;
     }
+
+    /*
+     * previous is part of a different arena and remains mapped.
+     * Relink only after the backing pages have been released.
+     */
+    previous->next =
+        next_arena;
 
     arena_count--;
     mapped_page_count -= pages;
 
     return true;
 }
-bool kfree(void *pointer)
+static bool kfree_locked(void *pointer)
 {
     /*
      * Like standard free(), releasing NULL is harmless.
@@ -953,6 +907,25 @@ bool kfree(void *pointer)
 
     return release_empty_arena(arena);
 }
+
+bool kfree(void *pointer)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &heap_lock
+        );
+
+    bool released =
+        kfree_locked(pointer);
+
+    spinlock_unlock_irqrestore(
+        &heap_lock,
+        interrupt_state
+    );
+
+    return released;
+}
+
 void *kcalloc(
     size_t count,
     size_t size
@@ -990,7 +963,7 @@ void *kcalloc(
 
     return allocation;
 }
-void *krealloc(
+static void *krealloc_locked(
     void *pointer,
     size_t requested_size
 )
@@ -999,14 +972,16 @@ void *krealloc(
      * realloc(NULL, size) behaves like malloc(size).
      */
     if (pointer == NULL) {
-        return kmalloc(requested_size);
+        return kmalloc_locked(
+            requested_size
+        );
     }
 
     /*
      * realloc(pointer, 0) releases the allocation.
      */
     if (requested_size == 0) {
-        kfree(pointer);
+        kfree_locked(pointer);
         return NULL;
     }
 
@@ -1119,7 +1094,7 @@ void *krealloc(
      * copy the old contents and release the old block.
      */
     void *new_pointer =
-        kmalloc(requested_size);
+        kmalloc_locked(requested_size);
 
     if (new_pointer == NULL) {
         /*
@@ -1135,17 +1110,42 @@ void *krealloc(
         old_size
     );
 
-    if (!kfree(pointer)) {
+    if (!kfree_locked(pointer)) {
         /*
          * This indicates heap corruption. Release the replacement
          * so we do not leak another allocation.
          */
-        kfree(new_pointer);
+        kfree_locked(new_pointer);
         return NULL;
     }
 
     return new_pointer;
 }
+
+void *krealloc(
+    void *pointer,
+    size_t requested_size
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &heap_lock
+        );
+
+    void *allocation =
+        krealloc_locked(
+            pointer,
+            requested_size
+        );
+
+    spinlock_unlock_irqrestore(
+        &heap_lock,
+        interrupt_state
+    );
+
+    return allocation;
+}
+
 bool kheap_self_test(void)
 {
     if (!heap_initialized) {
