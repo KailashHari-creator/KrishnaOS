@@ -3,6 +3,7 @@
 #include <memory.h>
 
 #include "memory/pmm.h"
+#include "sync/spinlock.h"
 
 #define PAGE_ENTRY_COUNT UINT64_C(512)
 #define PAGE_ADDRESS_MASK UINT64_C(0x000FFFFFFFFFF000)
@@ -23,6 +24,28 @@ static uint64_t vmm_hhdm_offset;
 static bool nx_available;
 static bool vmm_ready;
 static bool kernel_page_tables_owned;
+
+static spinlock_t vmm_lock =
+    SPINLOCK_INITIALIZER;
+
+static bool vmm_map_page_locked(
+    struct vmm_address_space *space,
+    uint64_t virtual_address,
+    uint64_t physical_address,
+    uint64_t flags
+);
+
+static bool vmm_unmap_page_locked(
+    struct vmm_address_space *space,
+    uint64_t virtual_address,
+    uint64_t *old_physical_address
+);
+
+static bool vmm_translate_locked(
+    const struct vmm_address_space *space,
+    uint64_t virtual_address,
+    uint64_t *physical_address
+);
 
 struct walk_result {
     uint64_t *tables[4];
@@ -488,7 +511,7 @@ static uint64_t sanitized_leaf_flags(uint64_t flags)
     return flags & allowed;
 }
 
-bool vmm_init(uint64_t hhdm_offset)
+static bool vmm_init_locked(uint64_t hhdm_offset)
 {
     if (vmm_ready) {
         return false;
@@ -515,7 +538,23 @@ bool vmm_init(uint64_t hhdm_offset)
     return true;
 }
 
-bool vmm_take_ownership(void)
+bool vmm_init(uint64_t hhdm_offset)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    bool initialized =
+        vmm_init_locked(hhdm_offset);
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return initialized;
+}
+
+static bool vmm_take_ownership_locked(void)
 {
     if (!vmm_ready) {
         return false;
@@ -555,7 +594,7 @@ bool vmm_take_ownership(void)
      */
     uint64_t translated_instruction;
 
-    if (!vmm_translate(
+    if (!vmm_translate_locked(
             &candidate,
             (uint64_t)(uintptr_t)vmm_take_ownership,
             &translated_instruction
@@ -576,7 +615,7 @@ bool vmm_take_ownership(void)
 
     uint64_t translated_stack;
 
-    if (!vmm_translate(
+    if (!vmm_translate_locked(
             &candidate,
             current_stack_pointer,
             &translated_stack
@@ -595,7 +634,7 @@ bool vmm_take_ownership(void)
 
     uint64_t translated_pml4;
 
-    if (!vmm_translate(
+    if (!vmm_translate_locked(
             &candidate,
             new_pml4_virtual,
             &translated_pml4
@@ -621,12 +660,28 @@ bool vmm_take_ownership(void)
     return true;
 }
 
+bool vmm_take_ownership(void)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    bool owned =
+        vmm_take_ownership_locked();
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return owned;
+}
+
 struct vmm_address_space *vmm_kernel_address_space(void)
 {
     return vmm_ready ? &kernel_space : NULL;
 }
 
-bool vmm_map_page(
+static bool vmm_map_page_locked(
     struct vmm_address_space *space,
     uint64_t virtual_address,
     uint64_t physical_address,
@@ -669,7 +724,32 @@ bool vmm_map_page(
     return true;
 }
 
-bool vmm_map_pages(
+bool vmm_map_page(
+    struct vmm_address_space *space,
+    uint64_t virtual_address,
+    uint64_t physical_address,
+    uint64_t flags
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    bool mapped = vmm_map_page_locked(
+        space,
+        virtual_address,
+        physical_address,
+        flags
+    );
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return mapped;
+}
+
+static bool vmm_map_pages_locked(
     struct vmm_address_space *space,
     uint64_t virtual_address,
     uint64_t physical_address,
@@ -692,7 +772,7 @@ bool vmm_map_pages(
     uint64_t mapped = 0;
 
     for (; mapped < count; mapped++) {
-        if (!vmm_map_page(
+        if (!vmm_map_page_locked(
                 space,
                 virtual_address + mapped * VMM_PAGE_SIZE,
                 physical_address + mapped * VMM_PAGE_SIZE,
@@ -700,7 +780,7 @@ bool vmm_map_pages(
             )) {
             while (mapped > 0) {
                 mapped--;
-                vmm_unmap_page(
+                vmm_unmap_page_locked(
                     space,
                     virtual_address + mapped * VMM_PAGE_SIZE,
                     NULL
@@ -714,7 +794,34 @@ bool vmm_map_pages(
     return true;
 }
 
-bool vmm_unmap_page(
+bool vmm_map_pages(
+    struct vmm_address_space *space,
+    uint64_t virtual_address,
+    uint64_t physical_address,
+    size_t page_count,
+    uint64_t flags
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    bool mapped = vmm_map_pages_locked(
+        space,
+        virtual_address,
+        physical_address,
+        page_count,
+        flags
+    );
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return mapped;
+}
+
+static bool vmm_unmap_page_locked(
     struct vmm_address_space *space,
     uint64_t virtual_address,
     uint64_t *old_physical_address
@@ -778,7 +885,30 @@ bool vmm_unmap_page(
     return true;
 }
 
-bool vmm_translate(
+bool vmm_unmap_page(
+    struct vmm_address_space *space,
+    uint64_t virtual_address,
+    uint64_t *old_physical_address
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    bool unmapped = vmm_unmap_page_locked(
+        space,
+        virtual_address,
+        old_physical_address
+    );
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return unmapped;
+}
+
+static bool vmm_translate_locked(
     const struct vmm_address_space *space,
     uint64_t virtual_address,
     uint64_t *physical_address
@@ -833,7 +963,30 @@ bool vmm_translate(
     return false;
 }
 
-bool vmm_protect_page(
+bool vmm_translate(
+    const struct vmm_address_space *space,
+    uint64_t virtual_address,
+    uint64_t *physical_address
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    bool translated = vmm_translate_locked(
+        space,
+        virtual_address,
+        physical_address
+    );
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return translated;
+}
+
+static bool vmm_protect_page_locked(
     struct vmm_address_space *space,
     uint64_t virtual_address,
     uint64_t flags
@@ -878,7 +1031,30 @@ bool vmm_protect_page(
     return true;
 }
 
-void vmm_activate(struct vmm_address_space *space)
+bool vmm_protect_page(
+    struct vmm_address_space *space,
+    uint64_t virtual_address,
+    uint64_t flags
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    bool protected = vmm_protect_page_locked(
+        space,
+        virtual_address,
+        flags
+    );
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return protected;
+}
+
+static void vmm_activate_locked(struct vmm_address_space *space)
 {
     if (!vmm_ready || space == NULL) {
         return;
@@ -887,7 +1063,36 @@ void vmm_activate(struct vmm_address_space *space)
     write_cr3(space->pml4_physical);
 }
 
-bool vmm_nx_supported(void)
+void vmm_activate(struct vmm_address_space *space)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    vmm_activate_locked(space);
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+}
+
+static bool vmm_nx_supported_locked(void)
 {
     return nx_available;
+}
+
+bool vmm_nx_supported(void)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&vmm_lock);
+
+    bool supported =
+        vmm_nx_supported_locked();
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return supported;
 }

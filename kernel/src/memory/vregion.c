@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "memory/layout.h"
+#include "sync/spinlock.h"
 
 #define MAX_FREE_EXTENTS 256
 
@@ -17,27 +18,8 @@ static size_t free_extent_count;
 static uint64_t available_pages;
 static bool allocator_initialized;
 
-static volatile uint8_t allocator_lock;
-
-
-static void lock_allocator(void)
-{
-    while (__atomic_test_and_set(
-            &allocator_lock,
-            __ATOMIC_ACQUIRE
-        )) {
-        __asm__ volatile ("pause");
-    }
-}
-
-
-static void unlock_allocator(void)
-{
-    __atomic_clear(
-        &allocator_lock,
-        __ATOMIC_RELEASE
-    );
-}
+static spinlock_t allocator_lock =
+    SPINLOCK_INITIALIZER;
 
 
 static bool is_power_of_two(uint64_t value)
@@ -88,7 +70,7 @@ static void remove_extent(size_t index)
 }
 
 
-bool kernel_vregion_init(void)
+static bool kernel_vregion_init_locked(void)
 {
     if (allocator_initialized) {
         return false;
@@ -118,14 +100,29 @@ bool kernel_vregion_init(void)
     available_pages =
         free_extents[0].page_count;
 
-    allocator_lock = 0;
     allocator_initialized = true;
 
     return true;
 }
 
 
-uint64_t kernel_vregion_reserve(
+bool kernel_vregion_init(void)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&allocator_lock);
+
+    bool initialized =
+        kernel_vregion_init_locked();
+
+    spinlock_unlock_irqrestore(
+        &allocator_lock,
+        interrupt_state
+    );
+
+    return initialized;
+}
+
+static uint64_t kernel_vregion_reserve_locked(
     size_t requested_pages,
     size_t requested_alignment_pages
 )
@@ -152,10 +149,8 @@ uint64_t kernel_vregion_reserve(
     uint64_t alignment =
         alignment_pages * KRISHNA_PAGE_SIZE;
 
-    lock_allocator();
 
     if (page_count > available_pages) {
-        unlock_allocator();
         return VREGION_INVALID_ADDRESS;
     }
 
@@ -227,7 +222,6 @@ uint64_t kernel_vregion_reserve(
         else {
             if (free_extent_count >=
                 MAX_FREE_EXTENTS) {
-                unlock_allocator();
                 return VREGION_INVALID_ADDRESS;
             }
 
@@ -252,17 +246,35 @@ uint64_t kernel_vregion_reserve(
         }
 
         available_pages -= page_count;
-
-        unlock_allocator();
         return aligned_start;
     }
-
-    unlock_allocator();
     return VREGION_INVALID_ADDRESS;
 }
 
 
-bool kernel_vregion_release(
+uint64_t kernel_vregion_reserve(
+    size_t requested_pages,
+    size_t requested_alignment_pages
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&allocator_lock);
+
+    uint64_t address =
+        kernel_vregion_reserve_locked(
+            requested_pages,
+            requested_alignment_pages
+        );
+
+    spinlock_unlock_irqrestore(
+        &allocator_lock,
+        interrupt_state
+    );
+
+    return address;
+}
+
+static bool kernel_vregion_release_locked(
     uint64_t virtual_address,
     size_t requested_pages
 )
@@ -303,7 +315,6 @@ bool kernel_vregion_release(
         return false;
     }
 
-    lock_allocator();
 
     size_t position = 0;
 
@@ -327,7 +338,6 @@ bool kernel_vregion_release(
                 KRISHNA_PAGE_SIZE;
 
         if (previous_end > virtual_address) {
-            unlock_allocator();
             return false;
         }
     }
@@ -338,7 +348,6 @@ bool kernel_vregion_release(
     if (position < free_extent_count &&
         range_end >
             free_extents[position].start) {
-        unlock_allocator();
         return false;
     }
 
@@ -403,7 +412,6 @@ bool kernel_vregion_release(
     else {
         if (free_extent_count >=
             MAX_FREE_EXTENTS) {
-            unlock_allocator();
             return false;
         }
 
@@ -424,27 +432,60 @@ bool kernel_vregion_release(
     }
 
     available_pages += page_count;
-
-    unlock_allocator();
     return true;
 }
 
 
-uint64_t kernel_vregion_free_pages(void)
+bool kernel_vregion_release(
+    uint64_t virtual_address,
+    size_t requested_pages
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&allocator_lock);
+
+    bool released =
+        kernel_vregion_release_locked(
+            virtual_address,
+            requested_pages
+        );
+
+    spinlock_unlock_irqrestore(
+        &allocator_lock,
+        interrupt_state
+    );
+
+    return released;
+}
+
+static uint64_t kernel_vregion_free_pages_locked(void)
 {
     if (!allocator_initialized) {
         return 0;
     }
 
-    lock_allocator();
 
     uint64_t result =
         available_pages;
-
-    unlock_allocator();
     return result;
 }
 
+
+uint64_t kernel_vregion_free_pages(void)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&allocator_lock);
+
+    uint64_t pages =
+        kernel_vregion_free_pages_locked();
+
+    spinlock_unlock_irqrestore(
+        &allocator_lock,
+        interrupt_state
+    );
+
+    return pages;
+}
 
 bool kernel_vregion_self_test(void)
 {

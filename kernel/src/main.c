@@ -17,6 +17,8 @@
 #include "memory/vmm.h"
 #include "memory/vregion.h"
 #include "memory/heap.h"
+#include "memory/kernel_pages.h"
+#include "memory/kernel_stack.h"
 #include "sync/spinlock.h"
 /*
  * Tell Limine which base protocol revision our kernel expects.
@@ -426,6 +428,30 @@ serial_init();
 
     serial_write(
         "[OK] Kernel virtual-region allocator initialized\n"
+    );
+
+    if (!kernel_pages_self_test()) {
+        serial_write(
+            "[FAIL] Transactional kernel-page self-test failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Transactional kernel-page self-test passed\n"
+    );
+
+    if (!kernel_stack_self_test()) {
+        serial_write(
+            "[FAIL] Guarded kernel-stack self-test failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Guarded kernel-stack self-test passed\n"
     );
 
     if (!kheap_init()) {
