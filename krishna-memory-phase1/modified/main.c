@@ -11,13 +11,11 @@
 #include "graphics/console.h"
 #include "graphics/mouse_cursor.h"
 #include "interrupts.h"
-#include "shell.h"
-#include "ui/desktop.h"
 #include "memory/pmm.h"
 #include "memory/vmm.h"
-#include "memory/vregion.h"
-#include "memory/heap.h"
-#include "sync/spinlock.h"
+#include "shell.h"
+#include "ui/desktop.h"
+
 /*
  * Tell Limine which base protocol revision our kernel expects.
  */
@@ -44,10 +42,8 @@ static volatile struct limine_memmap_request memory_map_request = {
 };
 
 /*
- * Request Limine's Higher-Half Direct Map.
- *
- * This lets the kernel access physical address P through the
- * virtual address P + hhdm_offset.
+ * Ask Limine for the higher-half direct map. This gives the kernel a stable
+ * virtual address for every physical frame managed by the PMM.
  */
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_hhdm_request hhdm_request = {
@@ -147,15 +143,8 @@ static uint64_t read_tsc(void)
  */
 void kmain(void)
 {
-serial_init();
-
-    /*
-    * Install CPU exception handlers as early as possible.
-    */
-    interrupts_init();
-
+    serial_init();
     serial_write("\nKRISHNA OS early boot\n");
-    serial_write("[OK] CPU exception handlers initialized\n");
     serial_write("=====================\n");
 
     /*
@@ -309,19 +298,12 @@ serial_init();
         serial_write(
             "[FAIL] No higher-half direct map received\n"
         );
-
         kernel_halt();
     }
 
     uint64_t hhdm_offset =
         hhdm_request.response->offset;
 
-    /*
-    * Initialise physical-frame allocation first.
-    *
-    * The VMM needs the PMM whenever it must allocate another
-    * page-table page.
-    */
     if (!pmm_init(
             memory_map_request.response,
             hhdm_offset
@@ -329,7 +311,6 @@ serial_init();
         serial_write(
             "[FAIL] Physical-memory manager initialization failed\n"
         );
-
         kernel_halt();
     }
 
@@ -337,47 +318,10 @@ serial_init();
         "[OK] Physical-memory manager initialized\n"
     );
 
-    spinlock_t test_lock =
-        SPINLOCK_INITIALIZER;
-
-    bool interrupts_before =
-        interrupts_are_enabled();
-
-    interrupt_state_t test_state =
-        spinlock_lock_irqsave(
-            &test_lock
-        );
-
-    bool disabled_inside =
-        !interrupts_are_enabled();
-
-    spinlock_unlock_irqrestore(
-        &test_lock,
-        test_state
-    );
-
-    bool restored_after =
-        interrupts_are_enabled() ==
-            interrupts_before;
-
-    if (!disabled_inside ||
-        !restored_after) {
-        serial_write(
-            "[FAIL] IRQ-safe spinlock self-test failed\n"
-        );
-
-        kernel_halt();
-    }
-
-    serial_write(
-        "[OK] IRQ-safe spinlock self-test passed\n"
-    );
-
     if (!vmm_init(hhdm_offset)) {
         serial_write(
             "[FAIL] Virtual-memory manager initialization failed\n"
         );
-
         kernel_halt();
     }
 
@@ -385,127 +329,20 @@ serial_init();
         "[OK] Four-level x86-64 paging initialized\n"
     );
 
-    struct pmm_statistics before_page_table_clone;
-    struct pmm_statistics after_page_table_clone;
-
-    pmm_get_statistics(
-        &before_page_table_clone
-    );
-
-    if (!vmm_take_ownership()) {
-        serial_write(
-            "[FAIL] Unable to create KRISHNA-owned page tables\n"
-        );
-
-        kernel_halt();
-    }
-
-    pmm_get_statistics(
-        &after_page_table_clone
-    );
-
-    serial_write(
-        "[OK] KRISHNA-owned page tables activated\n"
-    );
-
-    if (!kernel_vregion_init()) {
-        serial_write(
-            "[FAIL] Kernel virtual-region allocator initialization failed\n"
-        );
-
-        kernel_halt();
-    }
-
-    if (!kernel_vregion_self_test()) {
-        serial_write(
-            "[FAIL] Kernel virtual-region allocator self-test failed\n"
-        );
-
-        kernel_halt();
-    }
-
-    serial_write(
-        "[OK] Kernel virtual-region allocator initialized\n"
-    );
-
-    if (!kheap_init()) {
-        serial_write(
-            "[FAIL] Kernel heap initialization failed\n"
-        );
-
-        kernel_halt();
-    }
-
-    if (!kheap_self_test()) {
-        serial_write(
-            "[FAIL] Kernel heap self-test failed\n"
-        );
-
-        kernel_halt();
-    }
-
-    serial_write(
-        "[OK] Complete Kernel heap self-test passed\n"
-    );
-
-    struct kheap_statistics heap_statistics;
-
-    kheap_get_statistics(
-        &heap_statistics
-    );
-
-    serial_write(
-        "[OK] Kernel heap arena created\n"
-    );
-
-    serial_write(
-        "Kernel heap mapped pages: "
-    );
-
-    serial_write_u64(
-        heap_statistics.mapped_pages
-    );
-
-    serial_write(
-        "\nKernel heap free bytes: "
-    );
-
-    serial_write_u64(
-        heap_statistics.free_bytes
-    );
-
-    serial_write("\n");
-
-    serial_write(
-        "Page-table frames cloned: "
-    );
-
-    serial_write_u64(
-        before_page_table_clone.free_pages -
-        after_page_table_clone.free_pages
-    );
-
-    serial_write("\n");
-
     struct pmm_statistics pmm_stats;
     pmm_get_statistics(&pmm_stats);
 
     serial_write("Managed physical pages: ");
     serial_write_u64(pmm_stats.managed_pages);
-
     serial_write("\nFree physical pages: ");
     serial_write_u64(pmm_stats.free_pages);
-
     serial_write("\nPaging metadata pages: ");
     serial_write_u64(pmm_stats.bitmap_pages);
-
     serial_write("\nNX protection: ");
-
-    if (vmm_nx_supported()) {
-        serial_write("supported\n");
-    } else {
-        serial_write("unavailable\n");
-    }
+    serial_write(
+        vmm_nx_supported() ?
+            "supported\n" : "unavailable\n"
+    );
 
     splash_set_progress(&graphics, 100);
 

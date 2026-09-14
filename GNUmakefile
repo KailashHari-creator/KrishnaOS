@@ -9,7 +9,7 @@ QEMUFLAGS := -m 2G
 
 # Internal QEMU flags that should not be changed by the user.
 override QEMU_MACHINE_FLAGS := \
-    -M q35
+    -M pc 
 override QEMU_UEFI_FLAGS := \
     -drive if=pflash,unit=0,format=raw,file=edk2-ovmf-bins/ovmf-code-x86_64.fd,readonly=on
 
@@ -110,6 +110,11 @@ $(IMAGE_NAME).iso: limine-binary/limine kernel
 	rm -rf iso_root
 	mkdir -p iso_root/boot
 	cp -v kernel/bin/kernel iso_root/boot/
+	mkdir -p iso_root/boot/assets
+	cp -v assets/krishna_logo.rgba iso_root/boot/assets/
+	cp -v assets/krishna_font.kfont iso_root/boot/assets/
+	cp -v assets/krishna_cursor.rgba iso_root/boot/assets/
+	cp -v assets/krishna_wallpaper.rgba iso_root/boot/assets/
 	mkdir -p iso_root/boot/limine
 	cp -v limine.conf limine-binary/limine-bios.sys limine-binary/limine-bios-cd.bin limine-binary/limine-uefi-cd.bin iso_root/boot/limine/
 	mkdir -p iso_root/EFI/BOOT
