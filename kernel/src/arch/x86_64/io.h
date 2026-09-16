@@ -25,4 +25,13 @@ static inline uint8_t io_read8(uint16_t port)
     return value;
 }
 
+/*
+ * Give legacy hardware enough time to process the previous I/O
+ * operation. Port 0x80 is conventionally used for this delay.
+ */
+static inline void io_wait(void)
+{
+    io_write8(0x80, 0);
+}
+
 #endif

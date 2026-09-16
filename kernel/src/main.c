@@ -21,6 +21,7 @@
 #include "memory/kernel_stack.h"
 #include "sync/spinlock.h"
 #include "task/thread.h"
+#include "arch/x86_64/apic.h"
 
 /*
  * Tell Limine which base protocol revision our kernel expects.
@@ -145,17 +146,13 @@ static uint64_t read_tsc(void)
  * Kernel entry point.
  * Limine transfers CPU execution here after loading the kernel.
  */
-/*
- * Kernel entry point.
- * Limine transfers CPU execution here after loading the kernel.
- */
 void kmain(void)
 {
-serial_init();
+    serial_init();
 
     /*
-    * Install CPU exception handlers as early as possible.
-    */
+     * Install CPU exception handlers as early as possible.
+     */
     interrupts_init();
 
     serial_write("\nKRISHNA OS early boot\n");
@@ -287,6 +284,7 @@ serial_init();
     serial_write_u64(
         memory.usable_bytes >> 20
     );
+
     serial_write(" MiB");
 
     splash_set_progress(&graphics, 65);
@@ -321,11 +319,11 @@ serial_init();
         hhdm_request.response->offset;
 
     /*
-    * Initialise physical-frame allocation first.
-    *
-    * The VMM needs the PMM whenever it must allocate another
-    * page-table page.
-    */
+     * Initialise physical-frame allocation first.
+     *
+     * The VMM needs the PMM whenever it must allocate another
+     * page-table page.
+     */
     if (!pmm_init(
             memory_map_request.response,
             hhdm_offset
@@ -341,6 +339,10 @@ serial_init();
         "[OK] Physical-memory manager initialized\n"
     );
 
+    /*
+     * Verify that IRQ-safe spinlocks preserve the previous
+     * interrupt state.
+     */
     spinlock_t test_lock =
         SPINLOCK_INITIALIZER;
 
@@ -501,11 +503,279 @@ serial_init();
     );
 
     if (!kernel_thread_blocking_self_test()) {
-        serial_write("[FAIL] Kernel-thread blocking self-test failed\n");
+        serial_write(
+            "[FAIL] Kernel-thread blocking self-test failed\n"
+        );
+
         kernel_halt();
     }
 
-    serial_write("[OK] Kernel-thread blocking self-test passed\n");
+    serial_write(
+        "[OK] Kernel-thread blocking self-test passed\n"
+    );
+
+    /*
+     * Discover the interrupt-controller mode established by the
+     * processor and firmware. This operation is read-only.
+     */
+    struct local_apic_information apic_information;
+
+    if (!local_apic_probe(
+            &apic_information
+        )) {
+        serial_write(
+            "[FAIL] Unable to inspect Local APIC configuration\n"
+        );
+
+        kernel_halt();
+    }
+
+    if (!apic_information.supported) {
+        serial_write(
+            "[FAIL] Processor does not support a Local APIC\n"
+        );
+
+        kernel_halt();
+    }
+
+    if (!apic_information.enabled) {
+        serial_write(
+            "[FAIL] Local APIC is not enabled\n"
+        );
+
+        kernel_halt();
+    }
+
+    if (apic_information.physical_address == 0 ||
+        (apic_information.physical_address &
+         (VMM_PAGE_SIZE - 1)) != 0) {
+        serial_write(
+            "[FAIL] Invalid Local APIC physical address\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Local APIC discovered\n"
+    );
+
+    serial_write(
+        "Local APIC physical address: "
+    );
+
+    serial_write_hex(
+        apic_information.physical_address
+    );
+
+    serial_write("\nLocal APIC mode: ");
+
+    switch (apic_information.mode) {
+        case LOCAL_APIC_MODE_XAPIC:
+            serial_write("xAPIC");
+            break;
+
+        case LOCAL_APIC_MODE_X2APIC:
+            serial_write("x2APIC");
+            break;
+
+        default:
+            serial_write("disabled");
+            break;
+    }
+
+    serial_write(
+        "\nBootstrap processor: "
+    );
+
+    serial_write(
+        apic_information.bootstrap_processor
+            ? "yes\n"
+            : "no\n"
+    );
+
+    serial_write(
+        "[OK] Local APIC discovery self-test passed\n"
+    );
+
+    /*
+     * Map the Local APIC hardware page into KRISHNA's dedicated
+     * cache-disabled MMIO region.
+     */
+    if (!local_apic_map(
+            &apic_information
+        )) {
+        serial_write(
+            "[FAIL] Unable to map Local APIC MMIO page\n"
+        );
+
+        kernel_halt();
+    }
+
+    struct local_apic_identity apic_identity;
+
+    if (!local_apic_read_identity(
+            &apic_identity
+        )) {
+        serial_write(
+            "[FAIL] Unable to read Local APIC registers\n"
+        );
+
+        kernel_halt();
+    }
+
+    if (apic_identity.lvt_entry_count < 4) {
+        serial_write(
+            "[FAIL] Invalid Local APIC LVT information\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Local APIC MMIO page mapped\n"
+    );
+
+    serial_write(
+        "Local APIC virtual address: "
+    );
+
+    serial_write_hex(
+        local_apic_virtual_address()
+    );
+
+    serial_write(
+        "\nLocal APIC ID: "
+    );
+
+    serial_write_u64(
+        apic_identity.apic_id
+    );
+
+    serial_write(
+        "\nLocal APIC version: "
+    );
+
+    serial_write_hex(
+        apic_identity.version
+    );
+
+    serial_write(
+        "\nLocal APIC LVT entries: "
+    );
+
+    serial_write_u64(
+        apic_identity.lvt_entry_count
+    );
+
+    serial_write(
+        "\nLocal APIC software enabled: "
+    );
+
+    serial_write(
+        apic_identity.software_enabled
+            ? "yes\n"
+            : "no\n"
+    );
+
+    serial_write(
+        "[OK] Local APIC MMIO read self-test passed\n"
+    );
+
+    /*
+     * The Local APIC timer is calibrated using the TSC.
+     * Validate the TSC before attempting timer initialization.
+     */
+    if (tsc_frequency_request.response == NULL ||
+        tsc_frequency_request.response->frequency == 0) {
+        serial_write(
+            "[FAIL] TSC frequency unavailable\n"
+        );
+
+        kernel_halt();
+    }
+
+    uint64_t tsc_frequency =
+        tsc_frequency_request.response->frequency;
+
+    /*
+     * Configure the Local APIC timer for a 100 Hz periodic tick.
+     * Interrupts remain globally disabled until the IDT gate and
+     * all Local APIC registers are ready.
+     */
+    if (!local_apic_timer_init(
+            100,
+            tsc_frequency
+        )) {
+        serial_write(
+            "[FAIL] Local APIC timer initialization failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    /*
+     * All interrupt gates and APIC registers are now ready.
+     */
+    interrupts_enable();
+
+    if (!interrupts_are_enabled()) {
+        serial_write(
+            "[FAIL] Unable to enable maskable interrupts\n"
+        );
+
+        kernel_halt();
+    }
+
+    uint64_t timer_test_start_ticks =
+        local_apic_timer_ticks();
+
+    uint64_t timer_test_start_tsc =
+        read_tsc();
+
+    /*
+     * Require at least three timer interrupts within one second.
+     */
+    while ((local_apic_timer_ticks() -
+            timer_test_start_ticks) < 3 &&
+           (read_tsc() -
+            timer_test_start_tsc) <
+                tsc_frequency) {
+        __asm__ volatile ("pause");
+    }
+
+    if ((local_apic_timer_ticks() -
+         timer_test_start_ticks) < 3) {
+        serial_write(
+            "[FAIL] Local APIC timer self-test failed\n"
+        );
+
+        serial_write(
+            "Timer ticks observed: "
+        );
+
+        serial_write_u64(
+            local_apic_timer_ticks() -
+            timer_test_start_ticks
+        );
+
+        serial_write("\n");
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Local APIC timer initialized at "
+    );
+
+    serial_write_u64(
+        local_apic_timer_frequency()
+    );
+
+    serial_write(" Hz\n");
+
+    serial_write(
+        "[OK] Local APIC timer self-test passed\n"
+    );
 
     struct kheap_statistics heap_statistics;
 
@@ -547,18 +817,38 @@ serial_init();
     serial_write("\n");
 
     struct pmm_statistics pmm_stats;
-    pmm_get_statistics(&pmm_stats);
 
-    serial_write("Managed physical pages: ");
-    serial_write_u64(pmm_stats.managed_pages);
+    pmm_get_statistics(
+        &pmm_stats
+    );
 
-    serial_write("\nFree physical pages: ");
-    serial_write_u64(pmm_stats.free_pages);
+    serial_write(
+        "Managed physical pages: "
+    );
 
-    serial_write("\nPaging metadata pages: ");
-    serial_write_u64(pmm_stats.bitmap_pages);
+    serial_write_u64(
+        pmm_stats.managed_pages
+    );
 
-    serial_write("\nNX protection: ");
+    serial_write(
+        "\nFree physical pages: "
+    );
+
+    serial_write_u64(
+        pmm_stats.free_pages
+    );
+
+    serial_write(
+        "\nPaging metadata pages: "
+    );
+
+    serial_write_u64(
+        pmm_stats.bitmap_pages
+    );
+
+    serial_write(
+        "\nNX protection: "
+    );
 
     if (vmm_nx_supported()) {
         serial_write("supported\n");
@@ -566,7 +856,10 @@ serial_init();
         serial_write("unavailable\n");
     }
 
-    splash_set_progress(&graphics, 100);
+    splash_set_progress(
+        &graphics,
+        100
+    );
 
     serial_write(
         "\n[OK] Early boot environment validated\n"
@@ -630,18 +923,6 @@ serial_init();
         kernel_halt();
     }
 
-    if (tsc_frequency_request.response == NULL ||
-        tsc_frequency_request.response->frequency == 0) {
-        serial_write(
-            "[FAIL] TSC frequency unavailable\n"
-        );
-
-        kernel_halt();
-    }
-
-    uint64_t tsc_frequency =
-        tsc_frequency_request.response->frequency;
-
     uint64_t cursor_interval =
         tsc_frequency / 2;
 
@@ -679,7 +960,9 @@ serial_init();
         kernel_halt();
     }
 
-    desktop_render(&desktop);
+    desktop_render(
+        &desktop
+    );
 
     serial_write(
         "[OK] KRISHNA desktop rendered\n"
@@ -706,7 +989,9 @@ serial_init();
         kernel_halt();
     }
 
-    mouse_cursor_show(&pointer);
+    mouse_cursor_show(
+        &pointer
+    );
 
     serial_write(
         "[OK] KRISHNA pointer displayed\n"
@@ -726,22 +1011,17 @@ serial_init();
     uint64_t next_cursor_toggle =
         read_tsc() + cursor_interval;
 
-    bool previous_left_button = false;
+    bool previous_left_button =
+        false;
+
+    struct mouse_event mouse_event;
 
     /*
      * KRISHNA OS desktop event loop.
      *
-     * Currently this handles mouse movement only.
-     * Terminal-icon hit testing will be added next.
+     * Both PS/2 devices must be polled because they share the
+     * controller output buffer.
      */
-    struct mouse_event mouse_event;
-
-    /*
-    * KRISHNA OS desktop event loop.
-    *
-    * Both PS/2 devices must be polled because they share the
-    * controller output buffer.
-    */
     for (;;) {
         bool key_available =
             keyboard_poll(&key_event);
@@ -750,10 +1030,10 @@ serial_init();
             mouse_poll(&mouse_event);
 
         kernel_thread_yield();
-        
+
         /*
-        * Move the pointer in either interface mode.
-        */
+         * Move the pointer in either interface mode.
+         */
         if (mouse_available) {
             mouse_cursor_move(
                 &pointer,
@@ -762,9 +1042,9 @@ serial_init();
             );
 
             /*
-            * Detect only the transition from released to pressed.
-            * This prevents one click from launching repeatedly.
-            */
+             * Detect only the transition from released to pressed.
+             * This prevents one click from launching repeatedly.
+             */
             bool left_clicked =
                 mouse_event.left_button &&
                 !previous_left_button;
@@ -779,11 +1059,12 @@ serial_init();
                     pointer.x + 2,
                     pointer.y + 2
                 )) {
-
                 /*
-                * Remove the pointer before replacing the desktop.
-                */
-                mouse_cursor_hide(&pointer);
+                 * Remove the pointer before replacing the desktop.
+                 */
+                mouse_cursor_hide(
+                    &pointer
+                );
 
                 if (!console_init(
                         &console,
@@ -830,12 +1111,16 @@ serial_init();
                     true
                 );
 
-                mode = INTERFACE_TERMINAL;
+                mode =
+                    INTERFACE_TERMINAL;
 
                 next_cursor_toggle =
-                    read_tsc() + cursor_interval;
+                    read_tsc() +
+                    cursor_interval;
 
-                mouse_cursor_show(&pointer);
+                mouse_cursor_show(
+                    &pointer
+                );
 
                 serial_write(
                     "[OK] Terminal application opened\n"
@@ -844,33 +1129,43 @@ serial_init();
         }
 
         /*
-        * Terminal keyboard handling.
-        */
+         * Terminal keyboard handling.
+         */
         if (mode == INTERFACE_TERMINAL &&
             key_available &&
             key_event.pressed) {
-
             /*
-            * Escape scancode in PS/2 Set 1 is 0x01.
-            */
+             * Escape scancode in PS/2 Set 1 is 0x01.
+             */
             if (key_event.scancode == 0x01) {
-                mouse_cursor_hide(&pointer);
+                mouse_cursor_hide(
+                    &pointer
+                );
 
-                desktop_render(&desktop);
+                desktop_render(
+                    &desktop
+                );
 
-                mode = INTERFACE_DESKTOP;
+                mode =
+                    INTERFACE_DESKTOP;
 
-                mouse_cursor_show(&pointer);
+                mouse_cursor_show(
+                    &pointer
+                );
 
                 serial_write(
                     "[OK] Returned to desktop\n"
                 );
-            } else if (key_event.character != '\0') {
-                mouse_cursor_hide(&pointer);
+            } else if (
+                key_event.character != '\0'
+            ) {
+                mouse_cursor_hide(
+                    &pointer
+                );
 
                 /*
-                * Preserve the serial developer mirror.
-                */
+                 * Preserve the serial developer mirror.
+                 */
                 if (key_event.character == '\b') {
                     serial_write("\b \b");
                 } else {
@@ -890,32 +1185,42 @@ serial_init();
                 );
 
                 next_cursor_toggle =
-                    read_tsc() + cursor_interval;
+                    read_tsc() +
+                    cursor_interval;
 
-                mouse_cursor_show(&pointer);
+                mouse_cursor_show(
+                    &pointer
+                );
             }
         }
 
         /*
-        * Blink the text cursor only while the terminal is open.
-        */
+         * Blink the text cursor only while the terminal is open.
+         */
         if (mode == INTERFACE_TERMINAL) {
-            uint64_t now = read_tsc();
+            uint64_t now =
+                read_tsc();
 
             if ((int64_t)(
-                    now - next_cursor_toggle
+                    now -
+                    next_cursor_toggle
                 ) >= 0) {
-                mouse_cursor_hide(&pointer);
+                mouse_cursor_hide(
+                    &pointer
+                );
 
                 console_set_cursor_visible(
                     &console,
                     !console.cursor_visible
                 );
 
-                mouse_cursor_show(&pointer);
+                mouse_cursor_show(
+                    &pointer
+                );
 
                 next_cursor_toggle =
-                    now + cursor_interval;
+                    now +
+                    cursor_interval;
             }
         }
 

@@ -28,22 +28,9 @@ struct idt_descriptor {
     uint64_t base;
 } __attribute__((packed));
 
-/*
- * CPU exception frame.
- *
- * RSP and SS are present when the exception crosses privilege
- * levels. We currently inspect only fields that are always present.
- */
-struct interrupt_frame {
-    uint64_t instruction_pointer;
-    uint64_t code_segment;
-    uint64_t flags;
-    uint64_t stack_pointer;
-    uint64_t stack_segment;
-} __attribute__((packed));
-
 static struct idt_entry idt[256];
-
+static uint16_t kernel_code_selector;
+static bool idt_initialized;
 
 /*
  * Permanently stop the current processor.
@@ -324,7 +311,6 @@ static void page_fault_handler(
 void interrupts_init(void)
 {
     struct idt_descriptor descriptor;
-    uint16_t code_selector;
 
     /*
      * External hardware interrupts must remain disabled until
@@ -341,37 +327,37 @@ void interrupts_init(void)
      */
     __asm__ volatile (
         "mov %%cs, %0"
-        : "=r"(code_selector)
+        : "=r"(kernel_code_selector)
     );
 
     idt_set_entry(
         0,
         (uint64_t)(uintptr_t)divide_error_handler,
-        code_selector
+        kernel_code_selector
     );
 
     idt_set_entry(
         6,
         (uint64_t)(uintptr_t)invalid_opcode_handler,
-        code_selector
+        kernel_code_selector
     );
 
     idt_set_entry(
         8,
         (uint64_t)(uintptr_t)double_fault_handler,
-        code_selector
+        kernel_code_selector
     );
 
     idt_set_entry(
         13,
         (uint64_t)(uintptr_t)general_protection_handler,
-        code_selector
+        kernel_code_selector
     );
 
     idt_set_entry(
         14,
         (uint64_t)(uintptr_t)page_fault_handler,
-        code_selector
+        kernel_code_selector
     );
 
     descriptor.limit =
@@ -386,6 +372,7 @@ void interrupts_init(void)
         : "m"(descriptor)
         : "memory"
     );
+    idt_initialized = true;
 
     /*
      * Do not execute STI here.
@@ -393,4 +380,44 @@ void interrupts_init(void)
      * Mouse and keyboard remain polling-based, while cursor timing
      * uses the timestamp counter.
      */
+}
+bool interrupts_install_gate(
+    uint8_t vector,
+    uintptr_t handler_address
+)
+{
+    if (!idt_initialized ||
+        handler_address == 0) {
+        return false;
+    }
+
+    idt_set_entry(
+        vector,
+        (uint64_t)handler_address,
+        kernel_code_selector
+    );
+
+    return true;
+}
+
+
+void interrupts_enable(void)
+{
+    __asm__ volatile (
+        "sti"
+        :
+        :
+        : "memory"
+    );
+}
+
+
+void interrupts_disable(void)
+{
+    __asm__ volatile (
+        "cli"
+        :
+        :
+        : "memory"
+    );
 }
