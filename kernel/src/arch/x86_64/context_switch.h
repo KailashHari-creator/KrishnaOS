@@ -6,10 +6,12 @@
 #define ARCH_RESCHEDULE_VECTOR UINT8_C(0xF1)
 
 /*
- * Exact stack image produced by context_switch.asm.
+ * Complete x86-64 interrupt-return context.
  *
- * RIP, CS and RFLAGS are pushed by the processor. The remaining
- * registers are pushed by the assembly interrupt entry.
+ * The assembly entry saves the fifteen general-purpose registers.
+ * The processor's 64-bit interrupt frame contains:
+ *
+ *     RIP, CS, RFLAGS, RSP, SS
  */
 struct arch_interrupt_context {
     uint64_t r15;
@@ -31,14 +33,13 @@ struct arch_interrupt_context {
     uint64_t instruction_pointer;
     uint64_t code_segment;
     uint64_t flags;
+    uint64_t stack_pointer;
+    uint64_t stack_segment;
 };
 
 void arch_local_apic_timer_interrupt_entry(void);
 void arch_reschedule_interrupt_entry(void);
 
-/*
- * Enter the scheduler using software interrupt 0xF1.
- */
 void arch_request_context_switch(void);
 
 #endif

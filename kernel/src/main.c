@@ -777,6 +777,18 @@ void kmain(void)
         "[OK] Local APIC timer self-test passed\n"
     );
 
+    if (!kernel_thread_enable_preemption()) {
+        serial_write(
+            "[FAIL] Unable to enable thread preemption\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Kernel-thread preemption enabled\n"
+    );
+
     if (!kernel_thread_timer_self_test()) {
         serial_write(
             "[FAIL] Preemptive scheduler self-test failed\n"

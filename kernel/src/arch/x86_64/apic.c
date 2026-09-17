@@ -508,7 +508,7 @@ bool local_apic_timer_init(
         ) ||
         !interrupts_install_gate(
             LOCAL_APIC_SPURIOUS_VECTOR,
-            (uintptr_t)arch_local_apic_timer_interrupt_entry
+            (uintptr_t)local_apic_spurious_interrupt_handler
         )) {
         return false;
     }

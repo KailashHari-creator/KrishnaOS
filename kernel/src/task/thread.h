@@ -112,4 +112,12 @@ uint64_t kernel_thread_scheduler_ticks(void);
  */
 bool kernel_thread_timer_self_test(void);
 
+/*
+ * Enable forced timer-driven thread scheduling.
+ *
+ * Call only after the Local APIC timer has been initialized and
+ * validated.
+ */
+bool kernel_thread_enable_preemption(void);
+
 #endif

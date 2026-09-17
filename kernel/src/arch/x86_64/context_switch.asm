@@ -53,7 +53,7 @@ global arch_request_context_switch
 
 ;  * Hardware has already pushed:
 ;  *
-;  *     RIP, CS, RFLAGS
+;  *     RIP, CS, RFLAGS, RSP, SS
 ;  *
 ;  * Save every GPR, ask C which complete context should run,
 ;  * switch RSP to that context, and return through IRETQ.

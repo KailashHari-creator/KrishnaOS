@@ -69,6 +69,8 @@ static volatile size_t timer_test_trace_index;
 static volatile bool timer_test_enabled;
 static volatile bool timer_test_failed;
 
+static bool scheduler_preemption_enabled;
+
 /*
  * Entered by RET from arch_context_switch() for a new thread.
  */
@@ -76,8 +78,8 @@ static _Noreturn void kernel_thread_bootstrap(void);
 
 _Static_assert(
     sizeof(struct arch_interrupt_context) ==
-        UINT64_C(18) * sizeof(uint64_t),
-    "Unexpected interrupt-context layout"
+        20 * sizeof(uint64_t),
+    "Unexpected interrupt-context size"
 );
 
 _Static_assert(
@@ -85,7 +87,23 @@ _Static_assert(
         struct arch_interrupt_context,
         instruction_pointer
     ) == 15 * sizeof(uint64_t),
-    "Incorrect interrupt-context layout"
+    "Incorrect instruction-pointer offset"
+);
+
+_Static_assert(
+    offsetof(
+        struct arch_interrupt_context,
+        stack_pointer
+    ) == 18 * sizeof(uint64_t),
+    "Incorrect stack-pointer offset"
+);
+
+_Static_assert(
+    offsetof(
+        struct arch_interrupt_context,
+        stack_segment
+    ) == 19 * sizeof(uint64_t),
+    "Incorrect stack-segment offset"
 );
 
 /*
@@ -139,67 +157,6 @@ static void reap_terminated_threads(void)
  *
  * and then executes RET.
  */
-// static bool initialize_thread_context(
-//     struct kernel_thread *thread
-// )
-// {
-//     if (thread == NULL ||
-//         thread->stack.stack_top == 0) {
-//         return false;
-//     }
-
-//     uint16_t code_segment;
-
-//     __asm__ volatile (
-//         "mov %%cs, %0"
-//         : "=r"(code_segment)
-//     );
-
-//     /*
-//      * IRETQ enters kernel_thread_bootstrap as if it were called.
-//      * Keep one fake return-address slot so RSP has System V function
-//      * entry alignment.
-//      */
-//     uint64_t *return_slot =
-//         (uint64_t *)(uintptr_t)(
-//             thread->stack.stack_top -
-//             sizeof(uint64_t)
-//         );
-
-//     *return_slot = 0;
-
-//     struct arch_interrupt_context *context =
-//         (struct arch_interrupt_context *)(
-//             (uintptr_t)return_slot -
-//             sizeof(struct arch_interrupt_context)
-//         );
-
-//     /*
-//      * Every GPR starts at zero. IRETQ restores RIP, CS and RFLAGS.
-//      *
-//      * Preserve the creator's interrupt state. Early boot threads
-//      * therefore begin with interrupts disabled, while threads made
-//      * after APIC initialization begin with interrupts enabled.
-//      */
-//     *context =
-//         (struct arch_interrupt_context){
-//             .instruction_pointer =
-//                 (uint64_t)(uintptr_t)
-//                     kernel_thread_bootstrap,
-
-//             .code_segment =
-//                 code_segment,
-
-//             .flags =
-//                 cpu_read_rflags() |
-//                 UINT64_C(0x2)
-//         };
-
-//     thread->saved_rsp =
-//         (uint64_t *)(void *)context;
-
-//     return true;
-// }
 static bool initialize_thread_context(
     struct kernel_thread *thread
 )
@@ -209,12 +166,23 @@ static bool initialize_thread_context(
         return false;
     }
 
+    uint16_t code_segment;
+    uint16_t stack_segment;
+
+    __asm__ volatile (
+        "mov %%cs, %0"
+        : "=r"(code_segment)
+    );
+
+    __asm__ volatile (
+        "mov %%ss, %0"
+        : "=r"(stack_segment)
+    );
+
     /*
-     * After IRETQ, RSP must be 8 modulo 16 at the bootstrap
-     * function's entry, as required by the System V ABI.
-     *
-     * This slot also acts as an invalid return address because
-     * kernel_thread_bootstrap() must never return.
+     * Preserve one fake return-address slot. IRETQ explicitly
+     * restores RSP to this address, giving the bootstrap function
+     * the System V entry alignment RSP % 16 == 8.
      */
     uint64_t *return_slot =
         (uint64_t *)(uintptr_t)(
@@ -230,36 +198,56 @@ static bool initialize_thread_context(
             sizeof(struct arch_interrupt_context)
         );
 
-    *context = (struct arch_interrupt_context){
-        .r15 = 0,
-        .r14 = 0,
-        .r13 = 0,
-        .r12 = 0,
-        .r11 = 0,
-        .r10 = 0,
-        .r9 = 0,
-        .r8 = 0,
-        .rdi = 0,
-        .rsi = 0,
-        .rbp = 0,
-        .rdx = 0,
-        .rcx = 0,
-        .rbx = 0,
-        .rax = 0,
+    uint64_t initial_flags =
+        UINT64_C(0x2);
 
-        .instruction_pointer =
-            (uint64_t)(uintptr_t)
-                kernel_thread_bootstrap,
+    /*
+     * Threads created after the APIC scheduler is enabled must allow
+     * timer interrupts. RFLAGS bit 9 is IF.
+     */
+    if (__atomic_load_n(
+            &scheduler_preemption_enabled,
+            __ATOMIC_ACQUIRE
+        )) {
+        initial_flags |=
+            UINT64_C(1) << 9;
+    }
 
-        .code_segment = UINT64_C(0x28),
+    *context =
+        (struct arch_interrupt_context){
+            .r15 = 0,
+            .r14 = 0,
+            .r13 = 0,
+            .r12 = 0,
+            .r11 = 0,
+            .r10 = 0,
+            .r9 = 0,
+            .r8 = 0,
+            .rdi = 0,
+            .rsi = 0,
+            .rbp = 0,
+            .rdx = 0,
+            .rcx = 0,
+            .rbx = 0,
+            .rax = 0,
 
-        /*
-         * Bit 1 must always be set.
-         * Interrupts remain disabled during the early cooperative
-         * tests because IF is deliberately clear.
-         */
-        .flags = UINT64_C(0x2)
-    };
+            .instruction_pointer =
+                (uint64_t)(uintptr_t)
+                    kernel_thread_bootstrap,
+
+            .code_segment =
+                (uint64_t)code_segment,
+
+            .flags =
+                initial_flags,
+
+            .stack_pointer =
+                (uint64_t)(uintptr_t)
+                    return_slot,
+
+            .stack_segment =
+                (uint64_t)stack_segment
+        };
 
     thread->saved_rsp =
         (uint64_t *)(void *)context;
@@ -342,7 +330,7 @@ bool kernel_thread_system_init(void)
 
     scheduler_slice_ticks = 0;
     scheduler_tick_count = 0;
-
+    scheduler_preemption_enabled = false;
     thread_system_initialized = true;
 
     spinlock_unlock_irqrestore(
@@ -353,6 +341,98 @@ bool kernel_thread_system_init(void)
     return true;
 }
 
+bool kernel_thread_enable_preemption(void)
+{
+    if (!thread_system_initialized) {
+        return false;
+    }
+
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &scheduler_lock
+        );
+
+    if (scheduler_preemption_enabled) {
+        spinlock_unlock_irqrestore(
+            &scheduler_lock,
+            interrupt_state
+        );
+
+        return false;
+    }
+
+    /*
+     * Start the first preemptive time slice cleanly.
+     */
+    scheduler_slice_ticks = 0;
+
+    __atomic_store_n(
+        &scheduler_preemption_enabled,
+        true,
+        __ATOMIC_RELEASE
+    );
+
+    spinlock_unlock_irqrestore(
+        &scheduler_lock,
+        interrupt_state
+    );
+
+    return true;
+}
+
+
+/*
+ * Called externally by the Local APIC assembly-backed interrupt
+ * dispatcher. This function must not be static.
+ */
+uint64_t *kernel_thread_timer_interrupt(
+    uint64_t *interrupted_rsp
+)
+{
+    if (!thread_system_initialized ||
+        interrupted_rsp == NULL) {
+        return interrupted_rsp;
+    }
+
+    __atomic_add_fetch(
+        &scheduler_tick_count,
+        UINT64_C(1),
+        __ATOMIC_RELAXED
+    );
+
+    /*
+     * The APIC timer may be active before forced scheduling is
+     * enabled. Count those ticks without switching threads.
+     */
+    if (!__atomic_load_n(
+            &scheduler_preemption_enabled,
+            __ATOMIC_ACQUIRE
+        )) {
+        return interrupted_rsp;
+    }
+
+    uint32_t slice_ticks =
+        __atomic_add_fetch(
+            &scheduler_slice_ticks,
+            UINT32_C(1),
+            __ATOMIC_RELAXED
+        );
+
+    if (slice_ticks <
+        KERNEL_THREAD_TIME_SLICE_TICKS) {
+        return interrupted_rsp;
+    }
+
+    __atomic_store_n(
+        &scheduler_slice_ticks,
+        UINT32_C(0),
+        __ATOMIC_RELAXED
+    );
+
+    return kernel_thread_reschedule_interrupt(
+        interrupted_rsp
+    );
+}
 
 struct kernel_thread *kernel_thread_create(
     kernel_thread_entry_t entry,
@@ -594,13 +674,12 @@ bool kernel_thread_block(void) {
         return false;
     }
 
-    previous->state = KERNEL_THREAD_BLOCKED;
-
-    spinlock_unlock_irqrestore(&scheduler_lock, flags);
+    previous->state =
+        KERNEL_THREAD_BLOCKED;
 
     /*
-    * Keep interrupts disabled between marking this thread blocked and
-    * entering the scheduler interrupt.
+    * Release the lock but keep interrupts disabled until the blocked
+    * thread has entered the scheduler.
     */
     spinlock_unlock(
         &scheduler_lock
@@ -609,8 +688,7 @@ bool kernel_thread_block(void) {
     arch_request_context_switch();
 
     /*
-    * The saved interrupt frame has IF cleared because block() disabled
-    * interrupts before INT. Restore the original state after wake-up.
+    * Execution returns here only after another thread wakes this one.
     */
     interrupt_restore(flags);
 
@@ -765,49 +843,6 @@ uint64_t kernel_thread_live_count(void)
     );
 
     return count;
-}
-
-
-uint64_t *kernel_thread_timer_interrupt(
-    uint64_t *interrupted_rsp
-)
-{
-    if (!thread_system_initialized ||
-        interrupted_rsp == NULL) {
-        return interrupted_rsp;
-    }
-
-    __atomic_add_fetch(
-        &scheduler_tick_count,
-        UINT64_C(1),
-        __ATOMIC_RELAXED
-    );
-
-    uint32_t slice_ticks =
-        __atomic_add_fetch(
-            &scheduler_slice_ticks,
-            UINT32_C(1),
-            __ATOMIC_RELAXED
-        );
-
-    if (slice_ticks <
-        KERNEL_THREAD_TIME_SLICE_TICKS) {
-        return interrupted_rsp;
-    }
-
-    __atomic_store_n(
-        &scheduler_slice_ticks,
-        UINT32_C(0),
-        __ATOMIC_RELAXED
-    );
-
-    /*
-     * The time slice expired. The selected RSP may belong to a
-     * completely different thread.
-     */
-    return kernel_thread_reschedule_interrupt(
-        interrupted_rsp
-    );
 }
 
 
