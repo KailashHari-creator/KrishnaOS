@@ -81,4 +81,30 @@ bool kernel_thread_wake(struct kernel_thread *thread);
 
 bool kernel_thread_blocking_self_test(void);
 
+/*
+ * Called by the timer interrupt handler once per hardware tick.
+ *
+ * This function must remain IRQ-safe and must not allocate,
+ * acquire scheduler locks, or switch stacks.
+ */
+void kernel_thread_timer_tick(void);
+
+
+/*
+ * Perform a deferred context switch if the current time slice
+ * has expired.
+ */
+void kernel_thread_preemption_point(void);
+
+
+/*
+ * Return the number of scheduler timer ticks observed.
+ */
+uint64_t kernel_thread_scheduler_ticks(void);
+
+/*
+ * Verify timer-driven deferred round-robin scheduling.
+ */
+bool kernel_thread_timer_self_test(void);
+
 #endif

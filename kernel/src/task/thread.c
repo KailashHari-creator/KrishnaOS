@@ -10,6 +10,12 @@
 
 #define KERNEL_THREAD_DEFAULT_STACK_PAGES ((size_t)4)
 
+#define KERNEL_THREAD_DEFAULT_STACK_PAGES \
+    ((size_t)4)
+
+#define KERNEL_THREAD_TIME_SLICE_TICKS \
+    UINT32_C(5)
+
 struct kernel_thread {
     uint64_t id;
 
@@ -56,6 +62,14 @@ static volatile bool blocking_test_failed;
 static spinlock_t scheduler_lock =
     SPINLOCK_INITIALIZER;
 
+static uint32_t scheduler_slice_ticks;
+static uint64_t scheduler_tick_count;
+static bool scheduler_reschedule_requested;
+
+static volatile uint8_t timer_test_trace[6];
+static volatile size_t timer_test_trace_index;
+static volatile bool timer_test_enabled;
+static volatile bool timer_test_failed;
 
 /*
  * Entered by RET from arch_context_switch() for a new thread.
@@ -230,6 +244,10 @@ bool kernel_thread_system_init(void)
     next_thread_id = 1;
     live_thread_count = 0;
     scheduler_faulted = false;
+
+    scheduler_slice_ticks = 0;
+    scheduler_tick_count = 0;
+    scheduler_reschedule_requested = false;
 
     thread_system_initialized = true;
 
@@ -620,6 +638,68 @@ uint64_t kernel_thread_live_count(void)
     return count;
 }
 
+void kernel_thread_timer_tick(void)
+{
+    if (!thread_system_initialized) {
+        return;
+    }
+
+    __atomic_add_fetch(
+        &scheduler_tick_count,
+        UINT64_C(1),
+        __ATOMIC_RELAXED
+    );
+
+    uint32_t slice_ticks =
+        __atomic_add_fetch(
+            &scheduler_slice_ticks,
+            UINT32_C(1),
+            __ATOMIC_RELAXED
+        );
+
+    if (slice_ticks >=
+        KERNEL_THREAD_TIME_SLICE_TICKS) {
+        __atomic_store_n(
+            &scheduler_slice_ticks,
+            UINT32_C(0),
+            __ATOMIC_RELAXED
+        );
+
+        __atomic_store_n(
+            &scheduler_reschedule_requested,
+            true,
+            __ATOMIC_RELEASE
+        );
+    }
+}
+
+
+void kernel_thread_preemption_point(void)
+{
+    if (!thread_system_initialized) {
+        return;
+    }
+
+    bool reschedule =
+        __atomic_exchange_n(
+            &scheduler_reschedule_requested,
+            false,
+            __ATOMIC_ACQ_REL
+        );
+
+    if (reschedule) {
+        kernel_thread_yield();
+    }
+}
+
+
+uint64_t kernel_thread_scheduler_ticks(void)
+{
+    return __atomic_load_n(
+        &scheduler_tick_count,
+        __ATOMIC_RELAXED
+    );
+}
 
 static _Noreturn void kernel_thread_bootstrap(void)
 {
@@ -855,4 +935,142 @@ bool kernel_thread_blocking_self_test(void) {
            !blocking_test_failed &&
            kernel_thread_live_count() == 0 &&
            trace_succeeded;
+}
+static void timer_test_thread_entry(
+    void *argument
+)
+{
+    uint8_t marker =
+        (uint8_t)(uintptr_t)argument;
+
+    if (!timer_test_enabled) {
+        return;
+    }
+
+    for (size_t iteration = 0;
+         iteration < 3;
+         iteration++) {
+        size_t index =
+            timer_test_trace_index;
+
+        if (index >=
+            sizeof(timer_test_trace)) {
+            timer_test_failed = true;
+            return;
+        }
+
+        timer_test_trace[index] =
+            marker;
+
+        timer_test_trace_index =
+            index + 1;
+
+        /*
+         * Remain active for one complete scheduler time slice.
+         *
+         * There is deliberately no direct kernel_thread_yield()
+         * here. Rotation must originate from the timer request.
+         */
+        uint64_t slice_start =
+            kernel_thread_scheduler_ticks();
+
+        while ((kernel_thread_scheduler_ticks() -
+                slice_start) <
+               KERNEL_THREAD_TIME_SLICE_TICKS) {
+            __asm__ volatile ("pause");
+        }
+
+        kernel_thread_preemption_point();
+    }
+}
+bool kernel_thread_timer_self_test(void)
+{
+    if (!thread_system_initialized ||
+        current_thread != &boot_thread) {
+        return false;
+    }
+
+    for (size_t index = 0;
+         index < sizeof(timer_test_trace);
+         index++) {
+        timer_test_trace[index] = 0;
+    }
+
+    timer_test_trace_index = 0;
+    timer_test_enabled = false;
+    timer_test_failed = false;
+
+    struct kernel_thread *thread_a =
+        kernel_thread_create(
+            timer_test_thread_entry,
+            (void *)(uintptr_t)1,
+            KERNEL_THREAD_DEFAULT_STACK_PAGES
+        );
+
+    struct kernel_thread *thread_b =
+        kernel_thread_create(
+            timer_test_thread_entry,
+            (void *)(uintptr_t)2,
+            KERNEL_THREAD_DEFAULT_STACK_PAGES
+        );
+
+    bool creation_succeeded =
+        thread_a != NULL &&
+        thread_b != NULL;
+
+    /*
+     * If only one allocation succeeded, allow that thread to run
+     * and terminate without entering the actual test.
+     */
+    timer_test_enabled =
+        creation_succeeded;
+
+    uint64_t timeout_start =
+        kernel_thread_scheduler_ticks();
+
+    while (kernel_thread_live_count() != 0 &&
+           (kernel_thread_scheduler_ticks() -
+            timeout_start) < UINT64_C(300)) {
+        /*
+         * The boot thread also changes context only when its timer
+         * time slice expires.
+         */
+        kernel_thread_preemption_point();
+
+        __asm__ volatile ("pause");
+    }
+
+    reap_terminated_threads();
+
+    bool trace_succeeded =
+        timer_test_trace_index ==
+            sizeof(timer_test_trace);
+
+    if (trace_succeeded) {
+        for (size_t index = 0;
+             index < sizeof(timer_test_trace);
+             index++) {
+            uint8_t expected =
+                (index & 1U) == 0
+                    ? UINT8_C(1)
+                    : UINT8_C(2);
+
+            if (timer_test_trace[index] !=
+                expected) {
+                trace_succeeded = false;
+                break;
+            }
+        }
+    }
+
+    bool all_threads_terminated =
+        kernel_thread_live_count() == 0;
+
+    timer_test_enabled = false;
+
+    return creation_succeeded &&
+        trace_succeeded &&
+        all_threads_terminated &&
+        !timer_test_failed &&
+        !scheduler_faulted;
 }

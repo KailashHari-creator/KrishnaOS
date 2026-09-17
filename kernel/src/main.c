@@ -777,6 +777,18 @@ void kmain(void)
         "[OK] Local APIC timer self-test passed\n"
     );
 
+    if (!kernel_thread_timer_self_test()) {
+        serial_write(
+            "[FAIL] Timer-driven scheduler self-test failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Timer-driven scheduler self-test passed\n"
+    );
+
     struct kheap_statistics heap_statistics;
 
     kheap_get_statistics(
@@ -924,7 +936,7 @@ void kmain(void)
     }
 
     uint64_t cursor_interval =
-        tsc_frequency / 2;
+        local_apic_timer_frequency() / 2;
 
     /*
      * Initialize the PS/2 mouse before entering desktop mode.
@@ -1009,7 +1021,7 @@ void kmain(void)
     struct shell shell;
 
     uint64_t next_cursor_toggle =
-        read_tsc() + cursor_interval;
+        local_apic_timer_ticks() + cursor_interval;
 
     bool previous_left_button =
         false;
@@ -1029,7 +1041,7 @@ void kmain(void)
         bool mouse_available =
             mouse_poll(&mouse_event);
 
-        kernel_thread_yield();
+        kernel_thread_preemption_point();
 
         /*
          * Move the pointer in either interface mode.
@@ -1115,7 +1127,7 @@ void kmain(void)
                     INTERFACE_TERMINAL;
 
                 next_cursor_toggle =
-                    read_tsc() +
+                    local_apic_timer_ticks() +
                     cursor_interval;
 
                 mouse_cursor_show(
@@ -1185,7 +1197,7 @@ void kmain(void)
                 );
 
                 next_cursor_toggle =
-                    read_tsc() +
+                    local_apic_timer_ticks() +
                     cursor_interval;
 
                 mouse_cursor_show(
@@ -1199,7 +1211,7 @@ void kmain(void)
          */
         if (mode == INTERFACE_TERMINAL) {
             uint64_t now =
-                read_tsc();
+                local_apic_timer_ticks();
 
             if ((int64_t)(
                     now -

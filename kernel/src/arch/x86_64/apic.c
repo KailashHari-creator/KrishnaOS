@@ -3,6 +3,7 @@
 #include "memory/vmm.h"
 #include "arch/x86_64/io.h"
 #include "interrupts.h"
+#include "task/thread.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -89,6 +90,8 @@ static volatile uint32_t *local_apic_registers;
 static volatile uint64_t local_apic_tick_count;
 static uint32_t local_apic_configured_frequency;
 static bool local_apic_timer_initialized;
+static uint64_t timer_tick_count;
+
 static uint64_t read_tsc(void);
 
 static uint32_t local_apic_read_register(
@@ -130,12 +133,10 @@ static void local_apic_timer_interrupt_handler(
 {
     (void)frame;
 
-    local_apic_tick_count++;
+    timer_tick_count++;
 
-    /*
-     * Local APIC interrupts are acknowledged through the LAPIC EOI
-     * register, not through the legacy 8259 PIC.
-     */
+    kernel_thread_timer_tick();
+
     local_apic_write_register(
         LOCAL_APIC_EOI_REGISTER,
         UINT32_C(0)
@@ -662,7 +663,7 @@ static uint64_t read_tsc(void)
 }
 uint64_t local_apic_timer_ticks(void)
 {
-    return local_apic_tick_count;
+    return timer_tick_count;
 }
 
 
