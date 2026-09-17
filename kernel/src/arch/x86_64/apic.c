@@ -4,6 +4,7 @@
 #include "arch/x86_64/io.h"
 #include "interrupts.h"
 #include "task/thread.h"
+#include "arch/x86_64/context_switch.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -87,10 +88,9 @@
     UINT16_C(0xA1)
 
 static volatile uint32_t *local_apic_registers;
-static volatile uint64_t local_apic_tick_count;
+static volatile uint64_t timer_tick_count;
 static uint32_t local_apic_configured_frequency;
 static bool local_apic_timer_initialized;
-static uint64_t timer_tick_count;
 
 static uint64_t read_tsc(void);
 
@@ -126,23 +126,28 @@ static void local_apic_write_register(
     __asm__ volatile ("" ::: "memory");
 }
 
-__attribute__((interrupt))
-static void local_apic_timer_interrupt_handler(
-    struct interrupt_frame *frame
+uint64_t *local_apic_timer_interrupt_dispatch(
+    uint64_t *interrupted_rsp
 )
 {
-    (void)frame;
-
     timer_tick_count++;
 
-    kernel_thread_timer_tick();
+    uint64_t *resume_rsp =
+        kernel_thread_timer_interrupt(
+            interrupted_rsp
+        );
 
+    /*
+     * Acknowledge the timer before returning into whichever thread
+     * the scheduler selected.
+     */
     local_apic_write_register(
         LOCAL_APIC_EOI_REGISTER,
         UINT32_C(0)
     );
-}
 
+    return resume_rsp;
+}
 
 __attribute__((interrupt))
 static void local_apic_spurious_interrupt_handler(
@@ -499,13 +504,11 @@ bool local_apic_timer_init(
      */
     if (!interrupts_install_gate(
             LOCAL_APIC_TIMER_VECTOR,
-            (uintptr_t)
-                local_apic_timer_interrupt_handler
+            (uintptr_t)arch_local_apic_timer_interrupt_entry
         ) ||
         !interrupts_install_gate(
             LOCAL_APIC_SPURIOUS_VECTOR,
-            (uintptr_t)
-                local_apic_spurious_interrupt_handler
+            (uintptr_t)arch_local_apic_timer_interrupt_entry
         )) {
         return false;
     }
@@ -629,7 +632,6 @@ bool local_apic_timer_init(
             initial_count
         );
 
-    local_apic_tick_count = 0;
 
     /*
      * Configure periodic delivery and unmask the timer.

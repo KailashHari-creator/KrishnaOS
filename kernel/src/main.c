@@ -779,14 +779,14 @@ void kmain(void)
 
     if (!kernel_thread_timer_self_test()) {
         serial_write(
-            "[FAIL] Timer-driven scheduler self-test failed\n"
+            "[FAIL] Preemptive scheduler self-test failed\n"
         );
 
         kernel_halt();
     }
 
     serial_write(
-        "[OK] Timer-driven scheduler self-test passed\n"
+        "[OK] Preemptive scheduler self-test passed\n"
     );
 
     struct kheap_statistics heap_statistics;

@@ -82,17 +82,22 @@ bool kernel_thread_wake(struct kernel_thread *thread);
 bool kernel_thread_blocking_self_test(void);
 
 /*
- * Called by the timer interrupt handler once per hardware tick.
- *
- * This function must remain IRQ-safe and must not allocate,
- * acquire scheduler locks, or switch stacks.
+ * Called from the assembly-backed Local APIC interrupt path.
  */
-void kernel_thread_timer_tick(void);
+uint64_t *kernel_thread_timer_interrupt(
+    uint64_t *interrupted_rsp
+);
 
 
 /*
- * Perform a deferred context switch if the current time slice
- * has expired.
+ * Called from the assembly-backed voluntary reschedule interrupt.
+ */
+uint64_t *kernel_thread_reschedule_interrupt(
+    uint64_t *interrupted_rsp
+);
+
+/*
+ * Safe non-interrupt maintenance point for deferred zombie cleanup.
  */
 void kernel_thread_preemption_point(void);
 
@@ -103,7 +108,7 @@ void kernel_thread_preemption_point(void);
 uint64_t kernel_thread_scheduler_ticks(void);
 
 /*
- * Verify timer-driven deferred round-robin scheduling.
+ * Verify forced timer-driven round-robin scheduling.
  */
 bool kernel_thread_timer_self_test(void);
 

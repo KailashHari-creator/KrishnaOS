@@ -66,4 +66,11 @@ bool local_apic_timer_init(
 uint64_t local_apic_timer_ticks(void);
 uint32_t local_apic_timer_frequency(void);
 
+/*
+ * Called exclusively by the assembly timer interrupt entry.
+ */
+uint64_t *local_apic_timer_interrupt_dispatch(
+    uint64_t *interrupted_rsp
+);
+
 #endif

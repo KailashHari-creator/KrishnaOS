@@ -7,8 +7,7 @@
 #include "memory/heap.h"
 #include "memory/kernel_stack.h"
 #include "sync/spinlock.h"
-
-#define KERNEL_THREAD_DEFAULT_STACK_PAGES ((size_t)4)
+#include "interrupts.h"
 
 #define KERNEL_THREAD_DEFAULT_STACK_PAGES \
     ((size_t)4)
@@ -64,7 +63,6 @@ static spinlock_t scheduler_lock =
 
 static uint32_t scheduler_slice_ticks;
 static uint64_t scheduler_tick_count;
-static bool scheduler_reschedule_requested;
 
 static volatile uint8_t timer_test_trace[6];
 static volatile size_t timer_test_trace_index;
@@ -76,6 +74,19 @@ static volatile bool timer_test_failed;
  */
 static _Noreturn void kernel_thread_bootstrap(void);
 
+_Static_assert(
+    sizeof(struct arch_interrupt_context) ==
+        UINT64_C(18) * sizeof(uint64_t),
+    "Unexpected interrupt-context layout"
+);
+
+_Static_assert(
+    offsetof(
+        struct arch_interrupt_context,
+        instruction_pointer
+    ) == 15 * sizeof(uint64_t),
+    "Incorrect interrupt-context layout"
+);
 
 /*
  * Free terminated threads only after execution has moved away from
@@ -128,6 +139,67 @@ static void reap_terminated_threads(void)
  *
  * and then executes RET.
  */
+// static bool initialize_thread_context(
+//     struct kernel_thread *thread
+// )
+// {
+//     if (thread == NULL ||
+//         thread->stack.stack_top == 0) {
+//         return false;
+//     }
+
+//     uint16_t code_segment;
+
+//     __asm__ volatile (
+//         "mov %%cs, %0"
+//         : "=r"(code_segment)
+//     );
+
+//     /*
+//      * IRETQ enters kernel_thread_bootstrap as if it were called.
+//      * Keep one fake return-address slot so RSP has System V function
+//      * entry alignment.
+//      */
+//     uint64_t *return_slot =
+//         (uint64_t *)(uintptr_t)(
+//             thread->stack.stack_top -
+//             sizeof(uint64_t)
+//         );
+
+//     *return_slot = 0;
+
+//     struct arch_interrupt_context *context =
+//         (struct arch_interrupt_context *)(
+//             (uintptr_t)return_slot -
+//             sizeof(struct arch_interrupt_context)
+//         );
+
+//     /*
+//      * Every GPR starts at zero. IRETQ restores RIP, CS and RFLAGS.
+//      *
+//      * Preserve the creator's interrupt state. Early boot threads
+//      * therefore begin with interrupts disabled, while threads made
+//      * after APIC initialization begin with interrupts enabled.
+//      */
+//     *context =
+//         (struct arch_interrupt_context){
+//             .instruction_pointer =
+//                 (uint64_t)(uintptr_t)
+//                     kernel_thread_bootstrap,
+
+//             .code_segment =
+//                 code_segment,
+
+//             .flags =
+//                 cpu_read_rflags() |
+//                 UINT64_C(0x2)
+//         };
+
+//     thread->saved_rsp =
+//         (uint64_t *)(void *)context;
+
+//     return true;
+// }
 static bool initialize_thread_context(
     struct kernel_thread *thread
 )
@@ -137,42 +209,60 @@ static bool initialize_thread_context(
         return false;
     }
 
-    uint64_t *stack_pointer =
-        (uint64_t *)(uintptr_t)
-            thread->stack.stack_top;
-
     /*
-     * Fake return address for kernel_thread_bootstrap().
+     * After IRETQ, RSP must be 8 modulo 16 at the bootstrap
+     * function's entry, as required by the System V ABI.
      *
-     * The bootstrap function never returns, but reserving this slot
-     * gives it the stack alignment expected by the System V ABI.
+     * This slot also acts as an invalid return address because
+     * kernel_thread_bootstrap() must never return.
      */
-    *(--stack_pointer) = 0;
+    uint64_t *return_slot =
+        (uint64_t *)(uintptr_t)(
+            thread->stack.stack_top -
+            sizeof(uint64_t)
+        );
 
-    /*
-     * RET in arch_context_switch() enters the bootstrap function.
-     */
-    *(--stack_pointer) =
-        (uint64_t)(uintptr_t)
-            kernel_thread_bootstrap;
+    *return_slot = 0;
 
-    /*
-     * Initial callee-saved registers:
-     *
-     *     RBP, RBX, R12, R13, R14, R15
-     *
-     * They are pushed in this order so memory contains the reverse
-     * order expected by the assembly POP sequence.
-     */
-    *(--stack_pointer) = 0; /* RBP */
-    *(--stack_pointer) = 0; /* RBX */
-    *(--stack_pointer) = 0; /* R12 */
-    *(--stack_pointer) = 0; /* R13 */
-    *(--stack_pointer) = 0; /* R14 */
-    *(--stack_pointer) = 0; /* R15 */
+    struct arch_interrupt_context *context =
+        (struct arch_interrupt_context *)(void *)(
+            (uint8_t *)return_slot -
+            sizeof(struct arch_interrupt_context)
+        );
+
+    *context = (struct arch_interrupt_context){
+        .r15 = 0,
+        .r14 = 0,
+        .r13 = 0,
+        .r12 = 0,
+        .r11 = 0,
+        .r10 = 0,
+        .r9 = 0,
+        .r8 = 0,
+        .rdi = 0,
+        .rsi = 0,
+        .rbp = 0,
+        .rdx = 0,
+        .rcx = 0,
+        .rbx = 0,
+        .rax = 0,
+
+        .instruction_pointer =
+            (uint64_t)(uintptr_t)
+                kernel_thread_bootstrap,
+
+        .code_segment = UINT64_C(0x28),
+
+        /*
+         * Bit 1 must always be set.
+         * Interrupts remain disabled during the early cooperative
+         * tests because IF is deliberately clear.
+         */
+        .flags = UINT64_C(0x2)
+    };
 
     thread->saved_rsp =
-        stack_pointer;
+        (uint64_t *)(void *)context;
 
     return true;
 }
@@ -204,7 +294,12 @@ bool kernel_thread_system_init(void)
             &scheduler_lock
         );
 
-    if (thread_system_initialized) {
+    if (thread_system_initialized ||
+    !interrupts_install_gate(
+        ARCH_RESCHEDULE_VECTOR,
+        (uintptr_t)
+            arch_reschedule_interrupt_entry
+    )) {
         spinlock_unlock_irqrestore(
             &scheduler_lock,
             interrupt_state
@@ -247,7 +342,6 @@ bool kernel_thread_system_init(void)
 
     scheduler_slice_ticks = 0;
     scheduler_tick_count = 0;
-    scheduler_reschedule_requested = false;
 
     thread_system_initialized = true;
 
@@ -341,42 +435,65 @@ struct kernel_thread *kernel_thread_create(
 }
 
 
-void kernel_thread_yield(void)
+/*
+ * Select another runnable context.
+ *
+ * The caller holds scheduler_lock and interrupts are disabled by the
+ * interrupt gate.
+ */
+static uint64_t *schedule_locked(
+    uint64_t *interrupted_rsp
+)
 {
-    if (!thread_system_initialized) {
-        return;
-    }
-
-    interrupt_state_t interrupt_state =
-        spinlock_lock_irqsave(
-            &scheduler_lock
-        );
-
     struct kernel_thread *previous =
         current_thread;
 
-    struct kernel_thread *next =
-        previous->next;
-
-    /*
-     * Find the next ready thread in circular order.
-     */
-    while (next != previous &&
-           next->state !=
-               KERNEL_THREAD_READY) {
-        next = next->next;
+    if (previous == NULL ||
+        interrupted_rsp == NULL) {
+        scheduler_faulted = true;
+        return interrupted_rsp;
     }
 
-    if (next == previous ||
-        next->state !=
-            KERNEL_THREAD_READY) {
-        spinlock_unlock_irqrestore(
-            &scheduler_lock,
-            interrupt_state
-        );
+    previous->saved_rsp =
+        interrupted_rsp;
 
-        reap_terminated_threads();
-        return;
+    /*
+     * A terminated thread has already been removed from the run
+     * queue. Otherwise continue searching after the current thread.
+     */
+    struct kernel_thread *start =
+        previous->state ==
+            KERNEL_THREAD_TERMINATED
+            ? run_queue_head
+            : previous->next;
+
+    struct kernel_thread *candidate =
+        start;
+
+    if (candidate != NULL) {
+        do {
+            if (candidate->state ==
+                KERNEL_THREAD_READY) {
+                break;
+            }
+
+            candidate =
+                candidate->next;
+        } while (candidate != start);
+    }
+
+    /*
+     * No alternative runnable thread exists.
+     */
+    if (candidate == NULL ||
+        candidate->state !=
+            KERNEL_THREAD_READY) {
+        if (previous->state !=
+            KERNEL_THREAD_RUNNING) {
+            scheduler_faulted = true;
+        }
+
+        return interrupted_rsp;
     }
 
     if (previous->state ==
@@ -385,32 +502,57 @@ void kernel_thread_yield(void)
             KERNEL_THREAD_READY;
     }
 
-    next->state =
+    candidate->state =
         KERNEL_THREAD_RUNNING;
 
     current_thread =
-        next;
+        candidate;
+
+    return candidate->saved_rsp;
+}
+
+
+uint64_t *kernel_thread_reschedule_interrupt(
+    uint64_t *interrupted_rsp
+)
+{
+    if (!thread_system_initialized ||
+        interrupted_rsp == NULL) {
+        return interrupted_rsp;
+    }
 
     /*
-     * Release the scheduler lock before switching stacks.
-     *
-     * This is safe in the cooperative phase because there is no
-     * timer-driven scheduler yet.
+     * Every ordinary scheduler-lock acquisition disables interrupts
+     * first. Therefore the interrupt cannot have interrupted a
+     * scheduler-lock owner on this CPU.
      */
-    spinlock_unlock_irqrestore(
-        &scheduler_lock,
-        interrupt_state
+    spinlock_lock(
+        &scheduler_lock
     );
 
-    arch_context_switch(
-        &previous->saved_rsp,
-        next->saved_rsp
+    uint64_t *resume_rsp =
+        schedule_locked(
+            interrupted_rsp
+        );
+
+    spinlock_unlock(
+        &scheduler_lock
     );
+
+    return resume_rsp;
+}
+
+
+void kernel_thread_yield(void)
+{
+    if (!thread_system_initialized) {
+        return;
+    }
+
+    arch_request_context_switch();
 
     /*
-     * Execution reaches here when this thread is eventually resumed.
-     * It is now safe to release stacks belonging to threads that
-     * terminated while another context was running.
+     * This executes after the yielding thread is selected again.
      */
     reap_terminated_threads();
 }
@@ -453,20 +595,25 @@ bool kernel_thread_block(void) {
     }
 
     previous->state = KERNEL_THREAD_BLOCKED;
-    next->state = KERNEL_THREAD_RUNNING;
-    current_thread = next;
 
     spinlock_unlock_irqrestore(&scheduler_lock, flags);
 
-    arch_context_switch(
-        &previous->saved_rsp,
-        next->saved_rsp
+    /*
+    * Keep interrupts disabled between marking this thread blocked and
+    * entering the scheduler interrupt.
+    */
+    spinlock_unlock(
+        &scheduler_lock
     );
 
+    arch_request_context_switch();
+
     /*
-     * Execution resumes here only after another thread wakes this
-     * thread and the scheduler selects it again.
-     */
+    * The saved interrupt frame has IF cleared because block() disabled
+    * interrupts before INT. Restore the original state after wake-up.
+    */
+    interrupt_restore(flags);
+
     reap_terminated_threads();
 
     return true;
@@ -563,36 +710,18 @@ _Noreturn void kernel_thread_exit(void)
     live_thread_count--;
 
     /*
-     * At minimum, the boot thread remains in the run queue.
-     */
-    struct kernel_thread *candidate =
-        next;
-
-    while (candidate->state !=
-           KERNEL_THREAD_READY) {
-        candidate =
-            candidate->next;
-    }
-
-    candidate->state =
-        KERNEL_THREAD_RUNNING;
-
-    current_thread =
-        candidate;
-
-    spinlock_unlock_irqrestore(
-        &scheduler_lock,
-        interrupt_state
+    * Leave interrupts disabled. The terminated thread must not execute
+    * again after entering the scheduler.
+    */
+    spinlock_unlock(
+        &scheduler_lock
     );
 
-    arch_context_switch(
-        &previous->saved_rsp,
-        candidate->saved_rsp
-    );
+    arch_request_context_switch();
 
     /*
-     * A terminated thread must never be scheduled again.
-     */
+    * A terminated thread must never return here.
+    */
     for (;;) {
         __asm__ volatile ("cli; hlt");
     }
@@ -638,10 +767,14 @@ uint64_t kernel_thread_live_count(void)
     return count;
 }
 
-void kernel_thread_timer_tick(void)
+
+uint64_t *kernel_thread_timer_interrupt(
+    uint64_t *interrupted_rsp
+)
 {
-    if (!thread_system_initialized) {
-        return;
+    if (!thread_system_initialized ||
+        interrupted_rsp == NULL) {
+        return interrupted_rsp;
     }
 
     __atomic_add_fetch(
@@ -657,20 +790,24 @@ void kernel_thread_timer_tick(void)
             __ATOMIC_RELAXED
         );
 
-    if (slice_ticks >=
+    if (slice_ticks <
         KERNEL_THREAD_TIME_SLICE_TICKS) {
-        __atomic_store_n(
-            &scheduler_slice_ticks,
-            UINT32_C(0),
-            __ATOMIC_RELAXED
-        );
-
-        __atomic_store_n(
-            &scheduler_reschedule_requested,
-            true,
-            __ATOMIC_RELEASE
-        );
+        return interrupted_rsp;
     }
+
+    __atomic_store_n(
+        &scheduler_slice_ticks,
+        UINT32_C(0),
+        __ATOMIC_RELAXED
+    );
+
+    /*
+     * The time slice expired. The selected RSP may belong to a
+     * completely different thread.
+     */
+    return kernel_thread_reschedule_interrupt(
+        interrupted_rsp
+    );
 }
 
 
@@ -680,16 +817,11 @@ void kernel_thread_preemption_point(void)
         return;
     }
 
-    bool reschedule =
-        __atomic_exchange_n(
-            &scheduler_reschedule_requested,
-            false,
-            __ATOMIC_ACQ_REL
-        );
-
-    if (reschedule) {
-        kernel_thread_yield();
-    }
+    /*
+     * Context switching is now automatic. This function remains as
+     * a safe place to free terminated-thread stacks.
+     */
+    reap_terminated_threads();
 }
 
 
@@ -966,11 +1098,11 @@ static void timer_test_thread_entry(
             index + 1;
 
         /*
-         * Remain active for one complete scheduler time slice.
-         *
-         * There is deliberately no direct kernel_thread_yield()
-         * here. Rotation must originate from the timer request.
-         */
+            * Remain active for one complete scheduler time slice.
+            *
+            * There is deliberately no yield or preemption-point call here.
+            * The APIC interrupt must forcibly switch this thread.
+        */
         uint64_t slice_start =
             kernel_thread_scheduler_ticks();
 
@@ -980,7 +1112,6 @@ static void timer_test_thread_entry(
             __asm__ volatile ("pause");
         }
 
-        kernel_thread_preemption_point();
     }
 }
 bool kernel_thread_timer_self_test(void)
@@ -999,6 +1130,13 @@ bool kernel_thread_timer_self_test(void)
     timer_test_trace_index = 0;
     timer_test_enabled = false;
     timer_test_failed = false;
+
+    /*
+        * Do not let the first thread run before the second thread and the
+        * shared test state are fully initialized.
+    */
+    interrupt_state_t creation_interrupt_state =
+        interrupt_save_disable();
 
     struct kernel_thread *thread_a =
         kernel_thread_create(
@@ -1024,6 +1162,10 @@ bool kernel_thread_timer_self_test(void)
      */
     timer_test_enabled =
         creation_succeeded;
+
+    interrupt_restore(
+        creation_interrupt_state
+    );
 
     uint64_t timeout_start =
         kernel_thread_scheduler_ticks();
