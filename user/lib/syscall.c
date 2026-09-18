@@ -73,3 +73,18 @@ int64_t krishna_yield(void)
         0
     );
 }
+
+int64_t krishna_close(
+    uint64_t handle
+)
+{
+    return krishna_syscall6(
+        KRISHNA_SYSCALL_CLOSE,
+        handle,
+        0,
+        0,
+        0,
+        0,
+        0
+    );
+}

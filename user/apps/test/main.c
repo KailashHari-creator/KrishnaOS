@@ -74,6 +74,36 @@ int main(void)
         return FAILURE_EXIT_STATUS;
     }
 
+        int64_t invalid_handle_result =
+        krishna_write(
+            UINT64_C(63),
+            message,
+            1
+        );
+
+    if (invalid_handle_result !=
+        -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    if (krishna_close(
+            KRISHNA_STDERR
+        ) != 0) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    int64_t closed_handle_result =
+        krishna_write(
+            KRISHNA_STDERR,
+            message,
+            1
+        );
+
+    if (closed_handle_result !=
+        -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR) {
+        return FAILURE_EXIT_STATUS;
+    }
+
     /*
      * Verify the table-driven unknown-syscall path.
      */

@@ -4,10 +4,12 @@
 #include <stdint.h>
 
 #include "arch/x86_64/context_switch.h"
-#include "drivers/serial.h"
 #include "interrupts.h"
 #include "task/thread.h"
 #include "user_copy.h"
+#include "object/object.h"
+#include "object/serial_console.h"
+#include "task/process.h"
 
 extern void arch_syscall_interrupt_entry(void);
 
@@ -83,44 +85,52 @@ static int64_t syscall_handle_write(
     (void)ignored_5;
     (void)ignored_6;
 
-    if (handle != KRISHNA_STDOUT &&
-        handle != KRISHNA_STDERR) {
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    if (process == NULL) {
+        return -KRISHNA_ERROR_NO_SUCH_PROCESS;
+    }
+
+    struct kernel_object *object =
+        kernel_process_handle_acquire(
+            process,
+            handle,
+            KERNEL_HANDLE_RIGHT_WRITE
+        );
+
+    if (object == NULL) {
         return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
     }
 
     if (size == 0) {
+        kernel_object_release(object);
         return 0;
     }
 
-    /*
-     * Avoid keeping interrupts disabled while printing an arbitrarily
-     * large malicious buffer.
-     */
     if (size > SYSCALL_MAX_WRITE_SIZE) {
+        kernel_object_release(object);
         return -KRISHNA_ERROR_INVALID_ARGUMENT;
     }
 
     char buffer[SYSCALL_WRITE_BUFFER_SIZE];
-
     size_t written = 0;
 
     while (written < (size_t)size) {
         size_t chunk =
             (size_t)size - written;
 
-        if (chunk >
-            sizeof(buffer)) {
+        if (chunk > sizeof(buffer)) {
             chunk = sizeof(buffer);
         }
 
-        uint64_t chunk_address;
-
         if (user_buffer >
             UINT64_MAX - written) {
+            kernel_object_release(object);
             return -KRISHNA_ERROR_ACCESS_FAULT;
         }
 
-        chunk_address =
+        uint64_t chunk_address =
             user_buffer + written;
 
         if (!copy_from_user(
@@ -129,23 +139,80 @@ static int64_t syscall_handle_write(
                     chunk_address,
                 chunk
             )) {
-            return -KRISHNA_ERROR_ACCESS_FAULT;
+            kernel_object_release(object);
+
+            return written != 0
+                ? (int64_t)written
+                : -KRISHNA_ERROR_ACCESS_FAULT;
         }
 
-        for (size_t index = 0;
-             index < chunk;
-             index++) {
-            serial_write_character(
-                buffer[index]
+        int64_t result =
+            kernel_object_write(
+                object,
+                buffer,
+                chunk
             );
+
+        if (result < 0) {
+            kernel_object_release(object);
+
+            return written != 0
+                ? (int64_t)written
+                : result;
         }
 
-        written += chunk;
+        if ((uint64_t)result >
+            (uint64_t)chunk) {
+            kernel_object_release(object);
+            return -KRISHNA_ERROR_IO;
+        }
+
+        if (result == 0) {
+            break;
+        }
+
+        written += (size_t)result;
+
+        if ((size_t)result < chunk) {
+            break;
+        }
     }
 
+    kernel_object_release(object);
     return (int64_t)written;
 }
 
+static int64_t syscall_handle_close(
+    uint64_t handle,
+    uint64_t ignored_2,
+    uint64_t ignored_3,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_2;
+    (void)ignored_3;
+    (void)ignored_4;
+    (void)ignored_5;
+    (void)ignored_6;
+
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    if (process == NULL) {
+        return -KRISHNA_ERROR_NO_SUCH_PROCESS;
+    }
+
+    if (!kernel_process_handle_close(
+            process,
+            handle
+        )) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    return 0;
+}
 
 static int64_t syscall_handle_getpid(
     uint64_t ignored_1,
@@ -213,7 +280,10 @@ static const syscall_handler_t syscall_table[
         syscall_handle_getpid,
 
     [KRISHNA_SYSCALL_YIELD] =
-        syscall_handle_yield
+        syscall_handle_yield,
+    
+    [KRISHNA_SYSCALL_CLOSE] =
+    syscall_handle_close
 };
 
 static uint64_t syscall_interrupt_save_disable(void)
@@ -251,6 +321,10 @@ static void syscall_interrupt_restore(uint64_t flags)
 bool syscall_init(void)
 {
     if (syscall_initialized) {
+        return false;
+    }
+
+    if (!serial_console_object_init()) {
         return false;
     }
 

@@ -66,6 +66,50 @@ bool kernel_process_detach_thread(
     struct kernel_process *process
 );
 
+struct kernel_object;
+
+#define KERNEL_PROCESS_MAX_HANDLES \
+    ((size_t)64)
+
+enum kernel_handle_rights {
+    KERNEL_HANDLE_RIGHT_READ =
+        UINT32_C(1) << 0,
+
+    KERNEL_HANDLE_RIGHT_WRITE =
+        UINT32_C(1) << 1,
+
+    KERNEL_HANDLE_RIGHT_IOCTL =
+        UINT32_C(1) << 2,
+
+    KERNEL_HANDLE_RIGHT_POLL =
+        UINT32_C(1) << 3,
+
+    KERNEL_HANDLE_RIGHT_MAP =
+        UINT32_C(1) << 4
+};
+
+bool kernel_process_handle_install(
+    struct kernel_process *process,
+    uint64_t handle,
+    struct kernel_object *object,
+    uint32_t rights
+);
+
+/*
+ * Returns a retained object. The caller must call
+ * kernel_object_release() after using it.
+ */
+struct kernel_object *kernel_process_handle_acquire(
+    struct kernel_process *process,
+    uint64_t handle,
+    uint32_t required_rights
+);
+
+bool kernel_process_handle_close(
+    struct kernel_process *process,
+    uint64_t handle
+);
+
 /*
  * Verify creation, kernel sharing, userspace isolation, CR3
  * switching and complete cleanup.

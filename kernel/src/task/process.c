@@ -8,6 +8,12 @@
 #include "memory/pmm.h"
 #include "memory/vmm.h"
 #include "sync/spinlock.h"
+#include "object/object.h"
+
+struct kernel_process_handle {
+    struct kernel_object *object;
+    uint32_t rights;
+};
 
 struct kernel_process {
     uint64_t id;
@@ -17,6 +23,8 @@ struct kernel_process {
     struct vmm_address_space address_space;
 
     size_t thread_count;
+
+    struct kernel_process_handle handles[KERNEL_PROCESS_MAX_HANDLES];
 
     /*
      * Process-list linkage.
@@ -153,6 +161,149 @@ struct kernel_process *kernel_process_create(void)
     return process;
 }
 
+bool kernel_process_handle_install(
+    struct kernel_process *process,
+    uint64_t handle,
+    struct kernel_object *object,
+    uint32_t rights
+)
+{
+    if (!process_system_initialized ||
+        process == NULL ||
+        object == NULL ||
+        handle >= KERNEL_PROCESS_MAX_HANDLES ||
+        rights == 0) {
+        return false;
+    }
+
+    /*
+     * Obtain the handle table's reference before publishing the
+     * object in the process.
+     */
+    if (!kernel_object_retain(object)) {
+        return false;
+    }
+
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &process_lock
+        );
+
+    bool installed = false;
+
+    if (process_registered_locked(process) &&
+        process->state ==
+            KERNEL_PROCESS_ALIVE &&
+        process->handles[handle].object ==
+            NULL) {
+        process->handles[handle].object =
+            object;
+
+        process->handles[handle].rights =
+            rights;
+
+        installed = true;
+    }
+
+    spinlock_unlock_irqrestore(
+        &process_lock,
+        interrupt_state
+    );
+
+    if (!installed) {
+        kernel_object_release(object);
+    }
+
+    return installed;
+}
+
+struct kernel_object *kernel_process_handle_acquire(
+    struct kernel_process *process,
+    uint64_t handle,
+    uint32_t required_rights
+)
+{
+    if (!process_system_initialized ||
+        process == NULL ||
+        handle >= KERNEL_PROCESS_MAX_HANDLES) {
+        return NULL;
+    }
+
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &process_lock
+        );
+
+    struct kernel_object *object = NULL;
+
+    struct kernel_process_handle *entry =
+        &process->handles[handle];
+
+    if (process_registered_locked(process) &&
+        process->state ==
+            KERNEL_PROCESS_ALIVE &&
+        entry->object != NULL &&
+        (entry->rights & required_rights) ==
+            required_rights &&
+        kernel_object_retain(
+            entry->object
+        )) {
+        object = entry->object;
+    }
+
+    spinlock_unlock_irqrestore(
+        &process_lock,
+        interrupt_state
+    );
+
+    return object;
+}
+
+bool kernel_process_handle_close(
+    struct kernel_process *process,
+    uint64_t handle
+)
+{
+    if (!process_system_initialized ||
+        process == NULL ||
+        handle >= KERNEL_PROCESS_MAX_HANDLES) {
+        return false;
+    }
+
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &process_lock
+        );
+
+    struct kernel_object *object = NULL;
+
+    if (process_registered_locked(process) &&
+        process->state ==
+            KERNEL_PROCESS_ALIVE &&
+        process->handles[handle].object !=
+            NULL) {
+        object =
+            process->handles[handle].object;
+
+        process->handles[handle].object =
+            NULL;
+
+        process->handles[handle].rights = 0;
+    }
+
+    spinlock_unlock_irqrestore(
+        &process_lock,
+        interrupt_state
+    );
+
+    if (object == NULL) {
+        return false;
+    }
+
+    kernel_object_release(object);
+    return true;
+}
+
 bool kernel_process_destroy(
     struct kernel_process *process
 )
@@ -162,6 +313,12 @@ bool kernel_process_destroy(
         process == &kernel_process) {
         return false;
     }
+
+    struct kernel_object *objects_to_release[
+        KERNEL_PROCESS_MAX_HANDLES
+    ];
+
+    size_t release_count = 0;
 
     interrupt_state_t interrupt_state =
         spinlock_lock_irqsave(
@@ -197,8 +354,7 @@ bool kernel_process_destroy(
     }
 
     /*
-     * Keep the process in the list until its address space has been
-     * successfully released.
+     * The address space must be empty before process destruction.
      */
     if (!vmm_address_space_destroy(
             &process->address_space
@@ -211,6 +367,23 @@ bool kernel_process_destroy(
         return false;
     }
 
+    for (size_t index = 0;
+         index < KERNEL_PROCESS_MAX_HANDLES;
+         index++) {
+        struct kernel_object *object =
+            process->handles[index].object;
+
+        if (object != NULL) {
+            objects_to_release[release_count++] =
+                object;
+
+            process->handles[index].object =
+                NULL;
+
+            process->handles[index].rights = 0;
+        }
+    }
+
     *link = process->next;
 
     process->state =
@@ -220,6 +393,17 @@ bool kernel_process_destroy(
         &process_lock,
         interrupt_state
     );
+
+    /*
+     * Destructors must run after releasing process_lock.
+     */
+    for (size_t index = 0;
+         index < release_count;
+         index++) {
+        kernel_object_release(
+            objects_to_release[index]
+        );
+    }
 
     return kfree(process);
 }

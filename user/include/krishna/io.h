@@ -10,4 +10,8 @@ int64_t krishna_write(
     size_t size
 );
 
+int64_t krishna_close(
+    uint64_t handle
+);
+
 #endif
