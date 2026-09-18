@@ -123,6 +123,19 @@ struct kernel_thread *kernel_thread_create_for_process(
 uint64_t kernel_thread_current_process_id(void);
 
 /*
+ * Create a thread whose first instruction executes in Ring 3.
+ *
+ * user_entry and user_stack_top must already be mapped with
+ * VMM_PAGE_USER in the supplied process.
+ */
+struct kernel_thread *kernel_thread_create_user(
+    struct kernel_process *process,
+    uint64_t user_entry,
+    uint64_t user_stack_top,
+    size_t kernel_stack_pages
+);
+
+/*
  * Verify scheduling between two independent process address spaces.
  */
 bool kernel_thread_process_self_test(void);

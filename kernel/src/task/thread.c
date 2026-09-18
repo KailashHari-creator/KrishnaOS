@@ -289,6 +289,105 @@ static bool initialize_thread_context(
     return true;
 }
 
+static bool initialize_user_thread_context(
+    struct kernel_thread *thread,
+    uint64_t user_entry,
+    uint64_t user_stack_top
+)
+{
+    if (thread == NULL ||
+        thread->process == NULL ||
+        thread->stack.stack_top == 0 ||
+        user_entry < USER_SPACE_BASE ||
+        user_entry > USER_SPACE_TOP ||
+        user_stack_top <= USER_SPACE_BASE ||
+        user_stack_top > USER_SPACE_TOP ||
+        (user_stack_top & UINT64_C(0x0F)) != 0) {
+        return false;
+    }
+
+    struct vmm_address_space *space =
+        kernel_process_address_space(
+            thread->process
+        );
+
+    uint64_t ignored_physical;
+
+    /*
+     * Verify that both the entry point and top of the user stack are
+     * backed by mapped pages.
+     */
+    if (space == NULL ||
+        !vmm_translate(
+            space,
+            user_entry,
+            &ignored_physical
+        ) ||
+        !vmm_translate(
+            space,
+            user_stack_top - sizeof(uint64_t),
+            &ignored_physical
+        )) {
+        return false;
+    }
+
+    struct arch_interrupt_context *context =
+        (struct arch_interrupt_context *)(uintptr_t)(
+            thread->stack.stack_top -
+            sizeof(struct arch_interrupt_context)
+        );
+
+    uint64_t initial_flags =
+        UINT64_C(0x2);
+
+    if (__atomic_load_n(
+            &scheduler_preemption_enabled,
+            __ATOMIC_ACQUIRE
+        )) {
+        initial_flags |=
+            UINT64_C(1) << 9;
+    }
+
+    *context =
+        (struct arch_interrupt_context){
+            .r15 = 0,
+            .r14 = 0,
+            .r13 = 0,
+            .r12 = 0,
+            .r11 = 0,
+            .r10 = 0,
+            .r9 = 0,
+            .r8 = 0,
+            .rdi = 0,
+            .rsi = 0,
+            .rbp = 0,
+            .rdx = 0,
+            .rcx = 0,
+            .rbx = 0,
+            .rax = 0,
+
+            .instruction_pointer =
+                user_entry,
+
+            .code_segment =
+                GDT_USER_CODE_SELECTOR,
+
+            .flags =
+                initial_flags,
+
+            .stack_pointer =
+                user_stack_top,
+
+            .stack_segment =
+                GDT_USER_DATA_SELECTOR
+        };
+
+    thread->saved_rsp =
+        (uint64_t *)(void *)context;
+
+    return true;
+}
+
 static bool thread_is_queued_locked(const struct kernel_thread *thread) {
     struct kernel_thread *candidate;
 
@@ -569,6 +668,98 @@ struct kernel_thread *kernel_thread_create_for_process(
 
     if (!initialize_thread_context(
             thread
+        )) {
+        (void)kernel_stack_release(
+            &thread->stack
+        );
+
+        (void)kfree(thread);
+
+        (void)kernel_process_detach_thread(
+            process
+        );
+
+        return NULL;
+    }
+
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &scheduler_lock
+        );
+
+    thread->id =
+        next_thread_id++;
+
+    thread->next =
+        run_queue_head;
+
+    run_queue_tail->next =
+        thread;
+
+    run_queue_tail =
+        thread;
+
+    live_thread_count++;
+
+    spinlock_unlock_irqrestore(
+        &scheduler_lock,
+        interrupt_state
+    );
+
+    return thread;
+}
+
+struct kernel_thread *kernel_thread_create_user(
+    struct kernel_process *process,
+    uint64_t user_entry,
+    uint64_t user_stack_top,
+    size_t kernel_stack_pages
+)
+{
+    if (!thread_system_initialized ||
+        process == NULL ||
+        kernel_stack_pages == 0 ||
+        kernel_process_address_space(process) == NULL) {
+        return NULL;
+    }
+
+    if (!kernel_process_attach_thread(process)) {
+        return NULL;
+    }
+
+    struct kernel_thread *thread =
+        kcalloc(
+            1,
+            sizeof(struct kernel_thread)
+        );
+
+    if (thread == NULL) {
+        (void)kernel_process_detach_thread(process);
+        return NULL;
+    }
+
+    if (!kernel_stack_allocate(
+            kernel_stack_pages,
+            &thread->stack
+        )) {
+        (void)kfree(thread);
+        (void)kernel_process_detach_thread(process);
+        return NULL;
+    }
+
+    thread->process = process;
+
+    thread->ring0_stack_top =
+        thread->stack.stack_top;
+
+    thread->entry = NULL;
+    thread->argument = NULL;
+    thread->state = KERNEL_THREAD_READY;
+
+    if (!initialize_user_thread_context(
+            thread,
+            user_entry,
+            user_stack_top
         )) {
         (void)kernel_stack_release(
             &thread->stack

@@ -91,39 +91,42 @@ static uint64_t read_cr2(void)
 static void idt_set_entry(
     uint8_t vector,
     uint64_t handler_address,
-    uint16_t code_selector
+    uint16_t code_selector,
+    uint8_t privilege_level
 )
 {
     struct idt_entry *entry =
         &idt[vector];
 
     entry->offset_low =
-        (uint16_t)(handler_address & 0xFFFF);
+        (uint16_t)(handler_address & UINT64_C(0xFFFF));
 
     entry->selector = code_selector;
-
-    /*
-     * IST zero means use the current stack.
-     *
-     * A dedicated emergency IST stack will be added when we
-     * introduce the Task State Segment.
-     */
     entry->ist = 0;
 
     /*
-     * 0x8E:
+     * Present, interrupt gate, requested DPL.
      *
-     * Present = 1
-     * DPL     = 0
-     * Type    = 64-bit interrupt gate
+     * DPL 0: kernel-only gate, attributes 0x8E.
+     * DPL 3: userspace-callable gate, attributes 0xEE.
      */
-    entry->attributes = 0x8E;
+    entry->attributes =
+        (uint8_t)(
+            UINT8_C(0x8E) |
+            ((privilege_level & UINT8_C(3)) << 5)
+        );
 
     entry->offset_middle =
-        (uint16_t)((handler_address >> 16) & 0xFFFF);
+        (uint16_t)(
+            (handler_address >> 16) &
+            UINT64_C(0xFFFF)
+        );
 
     entry->offset_high =
-        (uint32_t)((handler_address >> 32) & 0xFFFFFFFF);
+        (uint32_t)(
+            (handler_address >> 32) &
+            UINT64_C(0xFFFFFFFF)
+        );
 
     entry->reserved = 0;
 }
@@ -333,31 +336,36 @@ void interrupts_init(void)
     idt_set_entry(
         0,
         (uint64_t)(uintptr_t)divide_error_handler,
-        kernel_code_selector
+        kernel_code_selector,
+        0
     );
 
     idt_set_entry(
         6,
         (uint64_t)(uintptr_t)invalid_opcode_handler,
-        kernel_code_selector
+        kernel_code_selector,
+        0
     );
 
     idt_set_entry(
         8,
         (uint64_t)(uintptr_t)double_fault_handler,
-        kernel_code_selector
+        kernel_code_selector,
+        0
     );
 
     idt_set_entry(
         13,
         (uint64_t)(uintptr_t)general_protection_handler,
-        kernel_code_selector
+        kernel_code_selector,
+        0
     );
 
     idt_set_entry(
         14,
         (uint64_t)(uintptr_t)page_fault_handler,
-        kernel_code_selector
+        kernel_code_selector,
+        0
     );
 
     descriptor.limit =
@@ -394,12 +402,32 @@ bool interrupts_install_gate(
     idt_set_entry(
         vector,
         (uint64_t)handler_address,
-        kernel_code_selector
+        kernel_code_selector,
+        0
     );
 
     return true;
 }
 
+bool interrupts_install_user_gate(
+    uint8_t vector,
+    uintptr_t handler_address
+)
+{
+    if (!idt_initialized ||
+        handler_address == 0) {
+        return false;
+    }
+
+    idt_set_entry(
+        vector,
+        (uint64_t)handler_address,
+        kernel_code_selector,
+        3
+    );
+
+    return true;
+}
 
 void interrupts_enable(void)
 {

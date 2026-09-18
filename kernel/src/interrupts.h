@@ -38,4 +38,12 @@ bool interrupts_install_gate(
 void interrupts_enable(void);
 void interrupts_disable(void);
 
+/*
+ * Install an interrupt gate callable from Ring 3.
+ */
+bool interrupts_install_user_gate(
+    uint8_t vector,
+    uintptr_t handler_address
+);
+
 #endif
