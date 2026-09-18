@@ -4,5 +4,6 @@
 #include <stdbool.h>
 
 bool user_mode_self_test(void);
+bool user_desktop_start(void);
 
 #endif

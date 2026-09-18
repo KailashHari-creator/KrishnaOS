@@ -23,6 +23,13 @@ CFLAGS := \
 	-MMD \
 	-MP
 
+USER_CFLAGS += \
+	-mno-mmx \
+	-mno-sse \
+	-mno-sse2 \
+	-mgeneral-regs-only \
+	-fno-tree-vectorize
+
 ASFLAGS := \
 	-g \
 	-m64 \
@@ -40,33 +47,65 @@ LDFLAGS := \
 	-z noexecstack \
 	-T linker.ld
 
-CFILES := \
-	lib/syscall.c \
-	apps/test/main.c
+COMMON_CFILES := \
+	lib/syscall.c
 
-ASFILES := \
+COMMON_ASFILES := \
 	crt/start.S \
 	lib/syscall.S
 
-OBJECTS := \
-	$(addprefix obj/,$(CFILES:.c=.c.o)) \
-	$(addprefix obj/,$(ASFILES:.S=.S.o))
+TEST_CFILES := \
+	apps/test/main.c
+
+DESKTOP_CFILES := \
+	lib/graphics.c \
+	apps/desktop/main.c
+
+DESKTOP_ASFILES := \
+	apps/desktop/assets.S
+
+COMMON_OBJECTS := \
+	$(addprefix obj/,$(COMMON_CFILES:.c=.c.o)) \
+	$(addprefix obj/,$(COMMON_ASFILES:.S=.S.o))
+
+TEST_OBJECTS := \
+	$(COMMON_OBJECTS) \
+	$(addprefix obj/,$(TEST_CFILES:.c=.c.o))
+
+DESKTOP_OBJECTS := \
+	$(COMMON_OBJECTS) \
+	$(addprefix obj/,$(DESKTOP_CFILES:.c=.c.o)) \
+	$(addprefix obj/,$(DESKTOP_ASFILES:.S=.S.o))
 
 DEPENDENCIES := \
-	$(addprefix obj/,$(CFILES:.c=.c.d))
+	$(addprefix obj/,$(COMMON_CFILES:.c=.c.d)) \
+	$(addprefix obj/,$(TEST_CFILES:.c=.c.d)) \
+	$(addprefix obj/,$(DESKTOP_CFILES:.c=.c.d))
 
 .PHONY: all
-all: bin/user_test.elf
+all: \
+	bin/user_test.elf \
+	bin/desktop.elf
 
 -include $(DEPENDENCIES)
 
-bin/user_test.elf: $(OBJECTS) linker.ld GNUmakefile
+bin/user_test.elf: \
+	$(TEST_OBJECTS) \
+	linker.ld \
+	GNUmakefile
 	mkdir -p "$(dir $@)"
-	$(LD) $(LDFLAGS) $(OBJECTS) -o $@
+	$(LD) $(LDFLAGS) $(TEST_OBJECTS) -o $@
+
+bin/desktop.elf: \
+	$(DESKTOP_OBJECTS) \
+	linker.ld \
+	GNUmakefile
+	mkdir -p "$(dir $@)"
+	$(LD) $(LDFLAGS) $(DESKTOP_OBJECTS) -o $@
 
 obj/%.c.o: %.c GNUmakefile
 	mkdir -p "$(dir $@)"
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(USER_CFLAGS) -c $< -o $@
 
 obj/%.S.o: %.S GNUmakefile
 	mkdir -p "$(dir $@)"

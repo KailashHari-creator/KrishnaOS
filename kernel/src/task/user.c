@@ -40,7 +40,25 @@
  */
 extern const uint8_t embedded_user_test_elf_start[];
 extern const uint8_t embedded_user_test_elf_end[];
+extern const uint8_t embedded_desktop_elf_start[];
+extern const uint8_t embedded_desktop_elf_end[];
 
+#define USER_DESKTOP_STACK_PAGES \
+    ((size_t)16)
+
+#define USER_DESKTOP_KERNEL_STACK_PAGES \
+    ((size_t)4)
+
+static bool desktop_started;
+
+static struct {
+    struct kernel_process *process;
+
+    struct elf64_loaded_image image;
+
+    uint64_t stack_physical;
+    bool stack_mapped;
+} desktop_runtime;
 
 static void zero_page(void *page)
 {
@@ -345,4 +363,204 @@ cleanup:
     return passed &&
         before.free_pages ==
             after.free_pages;
+}
+bool user_desktop_start(void)
+{
+    if (desktop_started) {
+        return false;
+    }
+
+    const uint8_t *elf_file =
+        embedded_desktop_elf_start;
+
+    size_t elf_size =
+        (size_t)(
+            (uintptr_t)embedded_desktop_elf_end -
+            (uintptr_t)embedded_desktop_elf_start
+        );
+
+    if (elf_size == 0 ||
+        !elf64_validate(
+            elf_file,
+            elf_size
+        )) {
+        return false;
+    }
+
+    struct kernel_process *process =
+        kernel_process_create();
+
+    if (process == NULL) {
+        return false;
+    }
+
+    struct elf64_loaded_image image = {
+        .entry = 0,
+        .pages = NULL,
+        .page_count = 0
+    };
+
+    uint64_t stack_physical =
+        PMM_INVALID_ADDRESS;
+
+    bool image_loaded = false;
+    bool stack_mapped = false;
+
+    struct vmm_address_space *space =
+        kernel_process_address_space(
+            process
+        );
+
+    if (space == NULL) {
+        goto failure;
+    }
+
+    if (!serial_console_attach_standard_handles(
+            process
+        ) ||
+        !input_objects_attach_standard_handles(
+            process
+        ) ||
+        !framebuffer_object_attach(
+            process
+        )) {
+        goto failure;
+    }
+
+    if (!elf64_load(
+            process,
+            elf_file,
+            elf_size,
+            &image
+        )) {
+        goto failure;
+    }
+
+    image_loaded = true;
+
+    stack_physical =
+        pmm_allocate_pages(
+            USER_DESKTOP_STACK_PAGES
+        );
+
+    if (stack_physical ==
+        PMM_INVALID_ADDRESS) {
+        goto failure;
+    }
+
+    for (size_t page = 0;
+         page < USER_DESKTOP_STACK_PAGES;
+         page++) {
+        void *memory =
+            pmm_physical_to_virtual(
+                stack_physical +
+                (uint64_t)page *
+                    VMM_PAGE_SIZE
+            );
+
+        if (memory == NULL) {
+            goto failure;
+        }
+
+        zero_page(memory);
+    }
+
+    uint64_t stack_base =
+        USER_SPACE_TOP -
+        (uint64_t)
+            USER_DESKTOP_STACK_PAGES *
+            VMM_PAGE_SIZE;
+
+    uint64_t stack_flags =
+        VMM_PAGE_USER |
+        VMM_PAGE_WRITABLE;
+
+    if (vmm_nx_supported()) {
+        stack_flags |=
+            VMM_PAGE_NO_EXECUTE;
+    }
+
+    if (!vmm_map_pages(
+            space,
+            stack_base,
+            stack_physical,
+            USER_DESKTOP_STACK_PAGES,
+            stack_flags
+        )) {
+        goto failure;
+    }
+
+    stack_mapped = true;
+
+    /*
+     * Preserve ownership information before making the thread runnable.
+     */
+    desktop_runtime.process = process;
+    desktop_runtime.image = image;
+    desktop_runtime.stack_physical =
+        stack_physical;
+
+    desktop_runtime.stack_mapped =
+        true;
+
+    struct kernel_thread *thread =
+        kernel_thread_create_user(
+            process,
+            image.entry,
+            USER_SPACE_TOP,
+            USER_DESKTOP_KERNEL_STACK_PAGES
+        );
+
+    if (thread == NULL) {
+        desktop_runtime =
+            (typeof(desktop_runtime)){0};
+
+        goto failure;
+    }
+
+    desktop_started = true;
+    return true;
+
+failure:
+    if (stack_mapped) {
+        uint64_t stack_base =
+            USER_SPACE_TOP -
+            (uint64_t)
+                USER_DESKTOP_STACK_PAGES *
+                VMM_PAGE_SIZE;
+
+        for (size_t page = 0;
+             page <
+                USER_DESKTOP_STACK_PAGES;
+             page++) {
+            (void)vmm_unmap_page(
+                space,
+                stack_base +
+                    (uint64_t)page *
+                        VMM_PAGE_SIZE,
+                NULL
+            );
+        }
+    }
+
+    if (stack_physical !=
+        PMM_INVALID_ADDRESS) {
+        (void)pmm_free_pages(
+            stack_physical,
+            USER_DESKTOP_STACK_PAGES
+        );
+    }
+
+    if (image_loaded) {
+        (void)elf64_unload(
+            process,
+            &image
+        );
+    }
+
+    (void)kernel_process_destroy(
+        process
+    );
+
+    return false;
 }

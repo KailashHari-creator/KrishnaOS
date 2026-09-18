@@ -1035,6 +1035,26 @@ void kmain(void)
         __asm__ volatile ("pause");
     }
 
+        if (user_desktop_start()) {
+        serial_write(
+            "[OK] Ring-3 desktop process started\n"
+        );
+
+        /*
+         * The boot thread now becomes an idle/reaper context.
+         * All desktop rendering and input handling happen in Ring 3.
+         */
+        for (;;) {
+            kernel_thread_yield();
+            kernel_thread_preemption_point();
+        }
+    }
+
+    serial_write(
+        "[WARN] Ring-3 desktop failed; "
+        "falling back to kernel desktop\n"
+    );
+
     /*
      * Locate the desktop assets.
      */
