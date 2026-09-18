@@ -1236,6 +1236,26 @@ static _Noreturn void kernel_thread_bootstrap(void)
     kernel_thread_exit();
 }
 
+struct kernel_process *kernel_thread_current_process(void)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &scheduler_lock
+        );
+
+    struct kernel_process *process =
+        current_thread != NULL
+            ? current_thread->process
+            : NULL;
+
+    spinlock_unlock_irqrestore(
+        &scheduler_lock,
+        interrupt_state
+    );
+
+    return process;
+}
+
 uint64_t kernel_thread_current_process_id(void)
 {
     interrupt_state_t interrupt_state =

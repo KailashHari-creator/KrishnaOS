@@ -102,8 +102,12 @@ limine-binary/limine: limine-binary.tar.gz
 kernel/.deps-obtained:
 	./kernel/get-deps
 
+.PHONY: user
+user:
+	$(MAKE) -C user
+
 .PHONY: kernel
-kernel: kernel/.deps-obtained
+kernel: user kernel/.deps-obtained
 	$(MAKE) -C kernel
 
 $(IMAGE_NAME).iso: limine-binary/limine kernel
@@ -143,6 +147,7 @@ $(IMAGE_NAME).hdd: limine-binary/limine kernel
 .PHONY: clean
 clean:
 	$(MAKE) -C kernel clean
+	$(MAKE) -C user clean
 	rm -rf iso_root $(IMAGE_NAME).iso $(IMAGE_NAME).hdd
 
 .PHONY: distclean

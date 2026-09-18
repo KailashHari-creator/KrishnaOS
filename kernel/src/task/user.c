@@ -7,17 +7,24 @@
 #include "memory/pmm.h"
 #include "memory/vmm.h"
 #include "syscall.h"
+#include "task/elf.h"
 #include "task/process.h"
 #include "task/thread.h"
 
-#define USER_TEST_CODE_ADDRESS \
-    USER_SPACE_BASE
-
+/*
+ * Place the userspace stack near the top of the lower canonical half.
+ *
+ * The mapped page covers:
+ *
+ *     USER_TEST_STACK_ADDRESS
+ *         through
+ *     USER_TEST_STACK_TOP - 1
+ */
 #define USER_TEST_STACK_ADDRESS \
-    (USER_SPACE_BASE + VMM_PAGE_SIZE)
+    (USER_SPACE_TOP - VMM_PAGE_SIZE)
 
 #define USER_TEST_STACK_TOP \
-    (USER_TEST_STACK_ADDRESS + VMM_PAGE_SIZE)
+    USER_SPACE_TOP
 
 #define USER_TEST_KERNEL_STACK_PAGES \
     ((size_t)4)
@@ -26,25 +33,11 @@
     UINT64_C(42)
 
 /*
- * Ring-3 program:
- *
- *     mov eax, 1       ; SYS_EXIT
- *     mov edi, 42      ; exit status
- *     int 0x80
- *     ud2              ; must never execute
+ * Defined by task/user_image.asm.
  */
-static const uint8_t user_test_program[] = {
-    UINT8_C(0xB8),
-    UINT8_C(0x01), UINT8_C(0x00),
-    UINT8_C(0x00), UINT8_C(0x00),
+extern const uint8_t embedded_user_test_elf_start[];
+extern const uint8_t embedded_user_test_elf_end[];
 
-    UINT8_C(0xBF),
-    UINT8_C(0x2A), UINT8_C(0x00),
-    UINT8_C(0x00), UINT8_C(0x00),
-
-    UINT8_C(0xCD), UINT8_C(0x80),
-    UINT8_C(0x0F), UINT8_C(0x0B)
-};
 
 static void zero_page(void *page)
 {
@@ -57,6 +50,7 @@ static void zero_page(void *page)
         bytes[index] = 0;
     }
 }
+
 
 bool user_mode_self_test(void)
 {
@@ -71,16 +65,39 @@ bool user_mode_self_test(void)
     uint64_t exits_before =
         syscall_exit_count();
 
+    const uint8_t *elf_file =
+        embedded_user_test_elf_start;
+
+    size_t elf_size =
+        (size_t)(
+            (uintptr_t)embedded_user_test_elf_end -
+            (uintptr_t)embedded_user_test_elf_start
+        );
+
+    /*
+     * Validate the embedded file before creating any process resources.
+     */
+    if (elf_size == 0 ||
+        !elf64_validate(
+            elf_file,
+            elf_size
+        )) {
+        return false;
+    }
+
     struct kernel_process *process =
         kernel_process_create();
 
-    uint64_t code_frame =
-        PMM_INVALID_ADDRESS;
+    struct elf64_loaded_image image = {
+        .entry = 0,
+        .pages = NULL,
+        .page_count = 0
+    };
 
     uint64_t stack_frame =
         PMM_INVALID_ADDRESS;
 
-    bool code_mapped = false;
+    bool image_loaded = false;
     bool stack_mapped = false;
     bool passed = false;
 
@@ -100,52 +117,47 @@ bool user_mode_self_test(void)
         goto cleanup;
     }
 
-    code_frame = pmm_allocate_page();
-    stack_frame = pmm_allocate_page();
-
-    if (code_frame == PMM_INVALID_ADDRESS ||
-        stack_frame == PMM_INVALID_ADDRESS) {
+    /*
+     * Parse the ELF and install its PT_LOAD segments into this process.
+     */
+    if (!elf64_load(
+            process,
+            elf_file,
+            elf_size,
+            &image
+        )) {
         goto cleanup;
     }
 
-    uint8_t *code_memory =
-        (uint8_t *)pmm_physical_to_virtual(
-            code_frame
-        );
+    image_loaded = true;
+
+    /*
+     * Allocate a separate user stack.
+     *
+     * The ELF describes the program image, not the initial stack.
+     */
+    stack_frame =
+        pmm_allocate_page();
+
+    if (stack_frame ==
+        PMM_INVALID_ADDRESS) {
+        goto cleanup;
+    }
 
     void *stack_memory =
         pmm_physical_to_virtual(
             stack_frame
         );
 
-    if (code_memory == NULL ||
-        stack_memory == NULL) {
+    if (stack_memory == NULL) {
         goto cleanup;
-    }
-
-    zero_page(code_memory);
-    zero_page(stack_memory);
-
-    for (size_t index = 0;
-         index < sizeof(user_test_program);
-         index++) {
-        code_memory[index] =
-            user_test_program[index];
     }
 
     /*
-     * Executable and user-accessible, but not writable.
+     * A new process must never observe data left in an old physical
+     * allocation.
      */
-    if (!vmm_map_page(
-            space,
-            USER_TEST_CODE_ADDRESS,
-            code_frame,
-            VMM_PAGE_USER
-        )) {
-        goto cleanup;
-    }
-
-    code_mapped = true;
+    zero_page(stack_memory);
 
     uint64_t stack_flags =
         VMM_PAGE_USER |
@@ -167,10 +179,14 @@ bool user_mode_self_test(void)
 
     stack_mapped = true;
 
+    /*
+     * The thread now begins at the entry address read from the ELF
+     * header—not at a hard-coded address in the kernel.
+     */
     struct kernel_thread *thread =
         kernel_thread_create_user(
             process,
-            USER_TEST_CODE_ADDRESS,
+            image.entry,
             USER_TEST_STACK_TOP,
             USER_TEST_KERNEL_STACK_PAGES
         );
@@ -180,20 +196,32 @@ bool user_mode_self_test(void)
     }
 
     /*
-     * The test program should execute and exit during the first
-     * scheduling opportunity.
+     * The ELF program:
+     *
+     * 1. Uses CALL/RET on the user stack.
+     * 2. Checks that BSS begins as zero.
+     * 3. Writes to its RW data segment.
+     * 4. Invokes SYS_EXIT through INT 0x80.
      */
     for (size_t attempt = 0;
          attempt < 32 &&
-         kernel_thread_live_count() > live_before;
+         kernel_thread_live_count() >
+            live_before;
          attempt++) {
         kernel_thread_yield();
     }
 
     kernel_thread_preemption_point();
 
-    if (kernel_thread_live_count() != live_before ||
-        kernel_process_thread_count(process) != 0 ||
+    /*
+     * The user thread must have exited, released its process reference
+     * and returned scheduling to PID 0.
+     */
+    if (kernel_thread_live_count() !=
+            live_before ||
+        kernel_process_thread_count(
+            process
+        ) != 0 ||
         kernel_thread_current_process_id() != 0 ||
         !vmm_address_space_is_active(
             vmm_kernel_address_space()
@@ -201,6 +229,11 @@ bool user_mode_self_test(void)
         goto cleanup;
     }
 
+    /*
+     * A successful ELF program exits with status 42.
+     *
+     * It exits with status 99 if stack, data or BSS validation fails.
+     */
     if (syscall_exit_count() !=
             exits_before + UINT64_C(1) ||
         syscall_last_exit_status() !=
@@ -214,7 +247,7 @@ bool user_mode_self_test(void)
 
 cleanup:
     /*
-     * Never remove mappings belonging to a running thread.
+     * Never unmap memory that may still be used by a live thread.
      */
     if (kernel_thread_live_count() !=
         live_before) {
@@ -223,62 +256,69 @@ cleanup:
 
     kernel_thread_preemption_point();
 
+    /*
+     * Remove and release the user stack.
+     */
     if (stack_mapped) {
-        uint64_t removed;
+        uint64_t removed_frame;
 
         if (!vmm_unmap_page(
                 space,
                 USER_TEST_STACK_ADDRESS,
-                &removed
+                &removed_frame
             ) ||
-            removed != stack_frame) {
+            removed_frame !=
+                stack_frame) {
             passed = false;
         } else {
             stack_mapped = false;
         }
     }
 
-    if (code_mapped) {
-        uint64_t removed;
+    if (!stack_mapped &&
+        stack_frame !=
+            PMM_INVALID_ADDRESS) {
+        if (!pmm_free_page(
+                stack_frame
+            )) {
+            passed = false;
+        }
 
-        if (!vmm_unmap_page(
-                space,
-                USER_TEST_CODE_ADDRESS,
-                &removed
-            ) ||
-            removed != code_frame) {
+        stack_frame =
+            PMM_INVALID_ADDRESS;
+    }
+
+    /*
+     * Remove all pages installed from PT_LOAD segments.
+     */
+    if (image_loaded) {
+        if (!elf64_unload(
+                process,
+                &image
+            )) {
             passed = false;
         } else {
-            code_mapped = false;
+            image_loaded = false;
         }
     }
 
+    /*
+     * The process address space must be empty before destruction.
+     */
     if (!stack_mapped &&
-        stack_frame != PMM_INVALID_ADDRESS) {
-        if (!pmm_free_page(stack_frame)) {
-            passed = false;
-        }
-
-        stack_frame = PMM_INVALID_ADDRESS;
-    }
-
-    if (!code_mapped &&
-        code_frame != PMM_INVALID_ADDRESS) {
-        if (!pmm_free_page(code_frame)) {
-            passed = false;
-        }
-
-        code_frame = PMM_INVALID_ADDRESS;
-    }
-
-    if (!code_mapped &&
-        !stack_mapped &&
-        !kernel_process_destroy(process)) {
+        !image_loaded &&
+        !kernel_process_destroy(
+            process
+        )) {
         passed = false;
     }
 
     pmm_get_statistics(&after);
 
+    /*
+     * This catches leaked ELF frames, stack frames and page-table pages.
+     */
     return passed &&
-        before.free_pages == after.free_pages;
+        before.free_pages ==
+            after.free_pages;
 }

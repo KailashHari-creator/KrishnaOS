@@ -1,0 +1,101 @@
+#include <stddef.h>
+#include <stdint.h>
+
+#include <krishna/abi.h>
+#include <krishna/io.h>
+#include <krishna/process.h>
+#include <krishna/syscall.h>
+
+#define EXPECTED_EXIT_STATUS 42
+#define FAILURE_EXIT_STATUS  99
+
+/*
+ * These retain the ELF loader's data and BSS checks.
+ */
+static volatile uint64_t initialized_data =
+    UINT64_C(0x1122334455667788);
+
+static volatile uint64_t zero_initialized_data;
+
+int main(void)
+{
+    static const char message[] =
+        "[USER] Hello from a KRISHNA OS C application!\n";
+
+    if (zero_initialized_data != 0) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    initialized_data =
+        UINT64_C(0x4B524953484E414F);
+
+    zero_initialized_data =
+        initialized_data;
+
+    if (initialized_data !=
+            UINT64_C(0x4B524953484E414F) ||
+        zero_initialized_data !=
+            UINT64_C(0x4B524953484E414F)) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    int64_t process_id =
+        krishna_getpid();
+
+    if (process_id <= 0) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    int64_t written =
+        krishna_write(
+            KRISHNA_STDOUT,
+            message,
+            sizeof(message) - 1
+        );
+
+    if (written !=
+        (int64_t)(sizeof(message) - 1)) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    /*
+     * Verify that an unmapped low address is rejected rather than
+     * crashing or allowing the kernel to read it.
+     */
+    int64_t invalid_pointer_result =
+        krishna_write(
+            KRISHNA_STDOUT,
+            (const void *)(uintptr_t)1,
+            1
+        );
+
+    if (invalid_pointer_result !=
+        -KRISHNA_ERROR_ACCESS_FAULT) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    /*
+     * Verify the table-driven unknown-syscall path.
+     */
+    int64_t unknown_result =
+        krishna_syscall6(
+            UINT64_C(999),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+        );
+
+    if (unknown_result !=
+        -KRISHNA_ERROR_NOT_IMPLEMENTED) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    if (krishna_yield() != 0) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    return EXPECTED_EXIT_STATUS;
+}

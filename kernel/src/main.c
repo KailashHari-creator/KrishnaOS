@@ -878,20 +878,20 @@ void kmain(void)
         kernel_halt();
     }
 
-    serial_write(
-        "[OK] Ring-3 system-call gate initialized\n"
-    );
-
     if (!user_mode_self_test()) {
         serial_write(
-            "[FAIL] Ring-3 execution self-test failed\n"
+            "[FAIL] ELF64 Ring-3 execution self-test failed\n"
         );
 
         kernel_halt();
     }
 
     serial_write(
-        "[OK] Ring-3 user process exited with status 42\n"
+        "[OK] ELF64 executable loaded and validated\n"
+    );
+
+    serial_write(
+        "[OK] ELF user process exited with status 42\n"
     );
 
     struct kheap_statistics heap_statistics;

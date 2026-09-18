@@ -120,6 +120,8 @@ struct kernel_thread *kernel_thread_create_for_process(
     size_t stack_pages
 );
 
+struct kernel_process *kernel_thread_current_process(void);
+
 uint64_t kernel_thread_current_process_id(void);
 
 /*
