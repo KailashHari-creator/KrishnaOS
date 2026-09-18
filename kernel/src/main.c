@@ -177,19 +177,10 @@ void kmain(void)
      */
     interrupts_init();
 
+    serial_write("\nKRISHNA OS early boot\n");
     serial_write(
         "[OK] CPU exception handlers initialized\n"
     );
-
-    serial_write("=====================\n");
-
-    /*
-     * Install CPU exception handlers as early as possible.
-     */
-    interrupts_init();
-
-    serial_write("\nKRISHNA OS early boot\n");
-    serial_write("[OK] CPU exception handlers initialized\n");
     serial_write("=====================\n");
 
     /*
@@ -870,6 +861,21 @@ void kmain(void)
         "[OK] Preemptive scheduler self-test passed\n"
     );
 
+    /*
+     * Initialize the PS/2 mouse before entering desktop mode.
+     */
+    if (!mouse_init()) {
+        serial_write(
+            "[FAIL] PS/2 mouse initialization failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] PS/2 mouse polling enabled\n"
+    );
+
     if (!syscall_init()) {
         serial_write(
             "[FAIL] System-call interface initialization failed\n"
@@ -994,12 +1000,22 @@ void kmain(void)
      * Keep the completed splash visible until a key is pressed.
      */
     struct key_event key_event;
+    struct mouse_event discarded_mouse_event;
 
     for (;;) {
         if (keyboard_poll(&key_event) &&
             key_event.pressed) {
             break;
         }
+
+        /*
+         * Keyboard and mouse share the PS/2 output buffer. Drain mouse
+         * packets so they cannot prevent keyboard_poll() from reaching
+         * the waiting keyboard byte.
+         */
+        (void)mouse_poll(
+            &discarded_mouse_event
+        );
 
         __asm__ volatile ("pause");
     }
@@ -1042,21 +1058,6 @@ void kmain(void)
 
     uint64_t cursor_interval =
         local_apic_timer_frequency() / 2;
-
-    /*
-     * Initialize the PS/2 mouse before entering desktop mode.
-     */
-    if (!mouse_init()) {
-        serial_write(
-            "[FAIL] PS/2 mouse initialization failed\n"
-        );
-
-        kernel_halt();
-    }
-
-    serial_write(
-        "[OK] PS/2 mouse polling enabled\n"
-    );
 
     /*
      * Validate and render the desktop.

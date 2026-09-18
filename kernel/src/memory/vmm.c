@@ -1201,6 +1201,126 @@ bool vmm_translate(
     return translated;
 }
 
+static bool vmm_translate_user_locked(
+    const struct vmm_address_space *space,
+    uint64_t virtual_address,
+    bool write_access,
+    uint64_t *physical_address
+)
+{
+    if (!vmm_ready ||
+        space == NULL ||
+        physical_address == NULL ||
+        !canonical_address(virtual_address)) {
+        return false;
+    }
+
+    uint16_t indexes[4];
+    fill_indexes(virtual_address, indexes);
+
+    uint64_t table_physical_address =
+        space->pml4_physical;
+
+    for (size_t level = 0;
+         level < 4;
+         level++) {
+        uint64_t *table =
+            table_virtual(
+                table_physical_address
+            );
+
+        if (table == NULL) {
+            return false;
+        }
+
+        uint64_t entry =
+            table[indexes[level]];
+
+        /*
+         * Ring 3 requires the USER bit at every page-table level.
+         * Effective write permission similarly requires WRITABLE at
+         * every level.
+         */
+        if ((entry & PAGE_PRESENT) == 0 ||
+            (entry & PAGE_USER) == 0 ||
+            (write_access &&
+             (entry & PAGE_WRITABLE) == 0)) {
+            return false;
+        }
+
+        if (level == 1 &&
+            (entry & PAGE_LARGE) != 0) {
+            uint64_t base =
+                entry &
+                UINT64_C(0x000FFFFFC0000000);
+
+            *physical_address =
+                base |
+                (virtual_address &
+                 UINT64_C(0x3FFFFFFF));
+
+            return true;
+        }
+
+        if (level == 2 &&
+            (entry & PAGE_LARGE) != 0) {
+            uint64_t base =
+                entry &
+                UINT64_C(0x000FFFFFFFE00000);
+
+            *physical_address =
+                base |
+                (virtual_address &
+                 UINT64_C(0x1FFFFF));
+
+            return true;
+        }
+
+        if (level == 3) {
+            *physical_address =
+                (entry & PAGE_ADDRESS_MASK) |
+                (virtual_address &
+                 (VMM_PAGE_SIZE -
+                  UINT64_C(1)));
+
+            return true;
+        }
+
+        table_physical_address =
+            entry & PAGE_ADDRESS_MASK;
+    }
+
+    return false;
+}
+
+bool vmm_translate_user(
+    const struct vmm_address_space *space,
+    uint64_t virtual_address,
+    bool write_access,
+    uint64_t *physical_address
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &vmm_lock
+        );
+
+    bool translated =
+        vmm_translate_user_locked(
+            space,
+            virtual_address,
+            write_access,
+            physical_address
+        );
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return translated;
+}
+
 static bool vmm_protect_page_locked(
     struct vmm_address_space *space,
     uint64_t virtual_address,

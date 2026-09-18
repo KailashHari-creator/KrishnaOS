@@ -1,3 +1,5 @@
+#include <stdint.h>
+
 #ifndef KRISHNA_ABI_H
 #define KRISHNA_ABI_H
 
@@ -5,6 +7,7 @@
  * KRISHNA OS userspace ABI version.
  */
 #define KRISHNA_ABI_VERSION 0
+
 
 /*
  * System-call numbers.
@@ -43,7 +46,8 @@
 #define KRISHNA_STDIN   0
 #define KRISHNA_STDOUT  1
 #define KRISHNA_STDERR  2
-
+#define KRISHNA_HANDLE_KEYBOARD 3
+#define KRISHNA_HANDLE_MOUSE    4
 /*
  * Positive error numbers.
  *
@@ -54,14 +58,42 @@
 #define KRISHNA_ERROR_PERMISSION_DENIED    1
 #define KRISHNA_ERROR_NO_SUCH_PROCESS      3
 #define KRISHNA_ERROR_INTERRUPTED          4
-#define KRISHNA_ERROR_IO                    5
+#define KRISHNA_ERROR_IO                   5
 #define KRISHNA_ERROR_BAD_FILE_DESCRIPTOR  9
+#define KRISHNA_ERROR_WOULD_BLOCK         11
 #define KRISHNA_ERROR_OUT_OF_MEMORY       12
 #define KRISHNA_ERROR_ACCESS_FAULT        14
 #define KRISHNA_ERROR_BUSY                16
 #define KRISHNA_ERROR_EXISTS              17
-#define KRISHNA_ERROR_NO_SUCH_FILE        2
+#define KRISHNA_ERROR_NO_SUCH_FILE         2
 #define KRISHNA_ERROR_INVALID_ARGUMENT    22
 #define KRISHNA_ERROR_NOT_IMPLEMENTED     38
+
+/*
+ * Keyboard events returned by reading KRISHNA_HANDLE_KEYBOARD.
+ */
+struct krishna_keyboard_event {
+    uint8_t scancode;
+    uint8_t character;
+    uint8_t pressed;
+    uint8_t reserved;
+};
+
+/*
+ * Mouse button bits.
+ */
+#define KRISHNA_MOUSE_BUTTON_LEFT   (UINT8_C(1) << 0)
+#define KRISHNA_MOUSE_BUTTON_RIGHT  (UINT8_C(1) << 1)
+#define KRISHNA_MOUSE_BUTTON_MIDDLE (UINT8_C(1) << 2)
+
+/*
+ * Mouse events returned by reading KRISHNA_HANDLE_MOUSE.
+ */
+struct krishna_mouse_event {
+    int16_t delta_x;
+    int16_t delta_y;
+    uint8_t buttons;
+    uint8_t reserved[3];
+};
 
 #endif

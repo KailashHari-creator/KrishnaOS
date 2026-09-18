@@ -9,12 +9,15 @@
 #include "user_copy.h"
 #include "object/object.h"
 #include "object/serial_console.h"
+#include "object/input.h"
 #include "task/process.h"
 
 extern void arch_syscall_interrupt_entry(void);
 
 #define SYSCALL_WRITE_BUFFER_SIZE ((size_t)128)
 #define SYSCALL_MAX_WRITE_SIZE    ((size_t)4096)
+#define SYSCALL_READ_BUFFER_SIZE ((size_t)128)
+#define SYSCALL_MAX_READ_SIZE    ((size_t)4096)
 
 typedef int64_t (*syscall_handler_t)(
     uint64_t argument_1,
@@ -71,6 +74,122 @@ static _Noreturn int64_t syscall_handle_exit(
     kernel_thread_exit();
 }
 
+static int64_t syscall_handle_read(
+    uint64_t handle,
+    uint64_t user_buffer,
+    uint64_t size,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_4;
+    (void)ignored_5;
+    (void)ignored_6;
+
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    if (process == NULL) {
+        return -KRISHNA_ERROR_NO_SUCH_PROCESS;
+    }
+
+    struct kernel_object *object =
+        kernel_process_handle_acquire(
+            process,
+            handle,
+            KERNEL_HANDLE_RIGHT_READ
+        );
+
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    if (size == 0) {
+        kernel_object_release(object);
+        return 0;
+    }
+
+    if (size > SYSCALL_MAX_READ_SIZE) {
+        kernel_object_release(object);
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    /*
+     * Validate the complete destination before consuming an input
+     * event. Otherwise an invalid pointer would discard the event.
+     */
+    if (!user_buffer_validate(
+            (void *)(uintptr_t)user_buffer,
+            (size_t)size,
+            true
+        )) {
+        kernel_object_release(object);
+        return -KRISHNA_ERROR_ACCESS_FAULT;
+    }
+
+    uint8_t buffer[SYSCALL_READ_BUFFER_SIZE];
+    size_t total = 0;
+
+    while (total < (size_t)size) {
+        size_t chunk =
+            (size_t)size - total;
+
+        if (chunk > sizeof(buffer)) {
+            chunk = sizeof(buffer);
+        }
+
+        int64_t result =
+            kernel_object_read(
+                object,
+                buffer,
+                chunk
+            );
+
+        if (result < 0) {
+            kernel_object_release(object);
+
+            return total != 0
+                ? (int64_t)total
+                : result;
+        }
+
+        if ((uint64_t)result >
+            (uint64_t)chunk) {
+            kernel_object_release(object);
+            return -KRISHNA_ERROR_IO;
+        }
+
+        if (result == 0) {
+            break;
+        }
+
+        if (user_buffer >
+            UINT64_MAX - total ||
+            !copy_to_user(
+                (void *)(uintptr_t)(
+                    user_buffer + total
+                ),
+                buffer,
+                (size_t)result
+            )) {
+            kernel_object_release(object);
+
+            return total != 0
+                ? (int64_t)total
+                : -KRISHNA_ERROR_ACCESS_FAULT;
+        }
+
+        total += (size_t)result;
+
+        if ((size_t)result < chunk) {
+            break;
+        }
+    }
+
+    kernel_object_release(object);
+    return (int64_t)total;
+}
 
 static int64_t syscall_handle_write(
     uint64_t handle,
@@ -273,6 +392,9 @@ static const syscall_handler_t syscall_table[
     [KRISHNA_SYSCALL_EXIT] =
         syscall_handle_exit,
 
+    [KRISHNA_SYSCALL_READ] =
+        syscall_handle_read,
+
     [KRISHNA_SYSCALL_WRITE] =
         syscall_handle_write,
 
@@ -283,7 +405,7 @@ static const syscall_handler_t syscall_table[
         syscall_handle_yield,
     
     [KRISHNA_SYSCALL_CLOSE] =
-    syscall_handle_close
+        syscall_handle_close
 };
 
 static uint64_t syscall_interrupt_save_disable(void)
@@ -325,6 +447,10 @@ bool syscall_init(void)
     }
 
     if (!serial_console_object_init()) {
+        return false;
+    }
+
+    if (!input_objects_init()) {
         return false;
     }
 

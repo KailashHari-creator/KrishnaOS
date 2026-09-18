@@ -123,6 +123,55 @@ int main(void)
         return FAILURE_EXIT_STATUS;
     }
 
+        struct krishna_keyboard_event
+        keyboard_event;
+
+    int64_t keyboard_result =
+        krishna_read(
+            KRISHNA_HANDLE_KEYBOARD,
+            &keyboard_event,
+            sizeof(keyboard_event)
+        );
+
+    if (keyboard_result !=
+            (int64_t)sizeof(keyboard_event) &&
+        keyboard_result !=
+            -KRISHNA_ERROR_WOULD_BLOCK) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    struct krishna_mouse_event
+        mouse_event;
+
+    int64_t mouse_result =
+        krishna_read(
+            KRISHNA_HANDLE_MOUSE,
+            &mouse_event,
+            sizeof(mouse_event)
+        );
+
+    if (mouse_result !=
+            (int64_t)sizeof(mouse_event) &&
+        mouse_result !=
+            -KRISHNA_ERROR_WOULD_BLOCK) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    /*
+     * An invalid destination must fail before consuming an event.
+     */
+    int64_t invalid_read_result =
+        krishna_read(
+            KRISHNA_HANDLE_KEYBOARD,
+            (void *)(uintptr_t)1,
+            sizeof(keyboard_event)
+        );
+
+    if (invalid_read_result !=
+        -KRISHNA_ERROR_ACCESS_FAULT) {
+        return FAILURE_EXIT_STATUS;
+    }
+
     if (krishna_yield() != 0) {
         return FAILURE_EXIT_STATUS;
     }

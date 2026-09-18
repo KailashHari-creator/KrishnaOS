@@ -88,3 +88,20 @@ int64_t krishna_close(
         0
     );
 }
+
+int64_t krishna_read(
+    uint64_t handle,
+    void *buffer,
+    size_t size
+)
+{
+    return krishna_syscall6(
+        KRISHNA_SYSCALL_READ,
+        handle,
+        (uint64_t)(uintptr_t)buffer,
+        (uint64_t)size,
+        0,
+        0,
+        0
+    );
+}

@@ -91,6 +91,19 @@ bool vmm_address_space_is_active(
     const struct vmm_address_space *space
 );
 
+/*
+ * Translate a userspace address while verifying that every relevant
+ * page-table level permits Ring-3 access.
+ *
+ * When write_access is true, the effective mapping must also be writable.
+ */
+bool vmm_translate_user(
+    const struct vmm_address_space *space,
+    uint64_t virtual_address,
+    bool write_access,
+    uint64_t *physical_address
+);
+
 void vmm_activate(struct vmm_address_space *space);
 bool vmm_nx_supported(void);
 

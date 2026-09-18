@@ -5,14 +5,23 @@
 #include <stddef.h>
 
 /*
- * Copy bytes from the current process into kernel memory.
- *
- * Every userspace page is translated independently. Kernel addresses,
- * unmapped addresses and overflowing ranges are rejected.
+ * Validate a userspace range without copying it.
  */
+bool user_buffer_validate(
+    const void *user_buffer,
+    size_t size,
+    bool write_access
+);
+
 bool copy_from_user(
     void *kernel_destination,
     const void *user_source,
+    size_t size
+);
+
+bool copy_to_user(
+    void *user_destination,
+    const void *kernel_source,
     size_t size
 );
 

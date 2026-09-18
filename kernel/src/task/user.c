@@ -11,6 +11,7 @@
 #include "task/process.h"
 #include "task/thread.h"
 #include "object/serial_console.h"
+#include "object/input.h"
 
 /*
  * Place the userspace stack near the top of the lower canonical half.
@@ -107,6 +108,13 @@ bool user_mode_self_test(void)
     }
 
     if (!serial_console_attach_standard_handles(
+        process
+    )) {
+        (void)kernel_process_destroy(process);
+        return false;
+    }
+
+    if (!input_objects_attach_standard_handles(
         process
     )) {
         (void)kernel_process_destroy(process);

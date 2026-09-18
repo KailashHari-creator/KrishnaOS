@@ -14,4 +14,10 @@ int64_t krishna_close(
     uint64_t handle
 );
 
+int64_t krishna_read(
+    uint64_t handle,
+    void *buffer,
+    size_t size
+);
+
 #endif
