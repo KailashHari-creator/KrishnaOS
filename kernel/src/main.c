@@ -21,7 +21,9 @@
 #include "memory/kernel_stack.h"
 #include "sync/spinlock.h"
 #include "task/thread.h"
+#include "task/process.h"
 #include "arch/x86_64/apic.h"
+#include "arch/x86_64/gdt.h"
 
 /*
  * Tell Limine which base protocol revision our kernel expects.
@@ -149,6 +151,35 @@ static uint64_t read_tsc(void)
 void kmain(void)
 {
     serial_init();
+
+    /*
+     * Replace the bootloader's descriptor table with KRISHNA's GDT.
+     *
+     * This must happen before interrupts_init(), because the IDT
+     * records the currently active kernel code selector.
+     */
+    if (!gdt_init()) {
+        serial_write(
+            "[FAIL] GDT and TSS initialization failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "\n[OK] GDT and TSS initialized\n"
+    );
+
+    /*
+     * The IDT now records KRISHNA kernel-code selector, 0x08.
+     */
+    interrupts_init();
+
+    serial_write(
+        "[OK] CPU exception handlers initialized\n"
+    );
+
+    serial_write("=====================\n");
 
     /*
      * Install CPU exception handlers as early as possible.
@@ -478,6 +509,30 @@ void kmain(void)
         "[OK] Complete Kernel heap self-test passed\n"
     );
 
+        if (!kernel_process_system_init()) {
+        serial_write(
+            "[FAIL] Kernel-process system initialization failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Kernel-process system initialized\n"
+    );
+
+    if (!kernel_process_self_test()) {
+        serial_write(
+            "[FAIL] Process address-space self-test failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Process address-space self-test passed\n"
+    );
+
     if (!kernel_thread_system_init()) {
         serial_write(
             "[FAIL] Kernel-thread system initialization failed\n"
@@ -512,6 +567,18 @@ void kmain(void)
 
     serial_write(
         "[OK] Kernel-thread blocking self-test passed\n"
+    );
+
+        if (!kernel_thread_process_self_test()) {
+        serial_write(
+            "[FAIL] Cross-process thread scheduling self-test failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Cross-process thread scheduling self-test passed\n"
     );
 
     /*

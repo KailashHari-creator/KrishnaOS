@@ -8,6 +8,11 @@
 #include "memory/kernel_stack.h"
 #include "sync/spinlock.h"
 #include "interrupts.h"
+#include "arch/x86_64/gdt.h"
+#include "memory/layout.h"
+#include "memory/pmm.h"
+#include "memory/vmm.h"
+#include "task/process.h"
 
 #define KERNEL_THREAD_DEFAULT_STACK_PAGES \
     ((size_t)4)
@@ -20,7 +25,21 @@ struct kernel_thread {
 
     enum kernel_thread_state state;
 
+    /*
+     * Process whose address space must be active while this thread
+     * executes.
+     */
+    struct kernel_process *process;
+
     struct kernel_stack stack;
+
+    /*
+     * Value installed into TSS.RSP0 when this thread is selected.
+     *
+     * For future user threads, interrupts entering ring 0 will begin
+     * at this stack top.
+     */
+    uint64_t ring0_stack_top;
 
     uint64_t *saved_rsp;
 
@@ -138,6 +157,21 @@ static void reap_terminated_threads(void)
             list = next;
             continue;
         }
+
+        /*
+         * Release the process reference only after the thread has
+         * completely stopped using its kernel stack and address
+         * space.
+         */
+        if (!kernel_process_detach_thread(
+                list->process
+            )) {
+            scheduler_faulted = true;
+            list = next;
+            continue;
+        }
+
+        list->process = NULL;
 
         if (!kfree(list)) {
             scheduler_faulted = true;
@@ -277,6 +311,12 @@ static bool thread_is_queued_locked(const struct kernel_thread *thread) {
 
 bool kernel_thread_system_init(void)
 {
+    struct kernel_process *owner =
+    kernel_process_kernel();
+
+    if (owner == NULL) {
+        return false;
+    }
     interrupt_state_t interrupt_state =
         spinlock_lock_irqsave(
             &scheduler_lock
@@ -295,23 +335,50 @@ bool kernel_thread_system_init(void)
 
         return false;
     }
+    if (!kernel_process_attach_thread(owner)) {
+    spinlock_unlock_irqrestore(
+        &scheduler_lock,
+        interrupt_state
+    );
+
+    return false;
+    }
 
     boot_thread =
         (struct kernel_thread){
             .id = 0,
+
             .state =
                 KERNEL_THREAD_RUNNING,
 
-            /*
-             * The current RSP will be captured the first time the
-             * boot thread switches away.
-             */
-            .saved_rsp = NULL,
+            .process = owner,
 
+            /*
+             * The boot thread has no dynamically allocated guarded
+             * stack. Use the bootstrap privilege stack installed by
+             * gdt_init() for its TSS.RSP0 value.
+             */
+            .ring0_stack_top =
+                gdt_kernel_stack(),
+
+            .saved_rsp = NULL,
             .entry = NULL,
             .argument = NULL,
             .next = &boot_thread
         };
+
+    if (boot_thread.ring0_stack_top == 0) {
+        (void)kernel_process_detach_thread(
+            owner
+        );
+
+        spinlock_unlock_irqrestore(
+            &scheduler_lock,
+            interrupt_state
+        );
+
+        return false;
+    }
 
     run_queue_head =
         &boot_thread;
@@ -434,22 +501,34 @@ uint64_t *kernel_thread_timer_interrupt(
     );
 }
 
-struct kernel_thread *kernel_thread_create(
+struct kernel_thread *kernel_thread_create_for_process(
+    struct kernel_process *process,
     kernel_thread_entry_t entry,
     void *argument,
     size_t stack_pages
 )
 {
     if (!thread_system_initialized ||
+        process == NULL ||
         entry == NULL ||
-        stack_pages == 0) {
+        stack_pages == 0 ||
+        kernel_process_address_space(
+            process
+        ) == NULL) {
         return NULL;
     }
 
     /*
-     * Allocate outside scheduler_lock. Heap and page allocation can
-     * take other locks and may require considerable work.
+     * Take the process reference first. This prevents another thread
+     * from destroying the process while allocation temporarily
+     * allows preemption.
      */
+    if (!kernel_process_attach_thread(
+            process
+        )) {
+        return NULL;
+    }
+
     struct kernel_thread *thread =
         kcalloc(
             1,
@@ -457,6 +536,10 @@ struct kernel_thread *kernel_thread_create(
         );
 
     if (thread == NULL) {
+        (void)kernel_process_detach_thread(
+            process
+        );
+
         return NULL;
     }
 
@@ -465,11 +548,22 @@ struct kernel_thread *kernel_thread_create(
             &thread->stack
         )) {
         (void)kfree(thread);
+
+        (void)kernel_process_detach_thread(
+            process
+        );
+
         return NULL;
     }
 
+    thread->process = process;
+
+    thread->ring0_stack_top =
+        thread->stack.stack_top;
+
     thread->entry = entry;
     thread->argument = argument;
+
     thread->state =
         KERNEL_THREAD_READY;
 
@@ -481,6 +575,11 @@ struct kernel_thread *kernel_thread_create(
         );
 
         (void)kfree(thread);
+
+        (void)kernel_process_detach_thread(
+            process
+        );
+
         return NULL;
     }
 
@@ -492,9 +591,6 @@ struct kernel_thread *kernel_thread_create(
     thread->id =
         next_thread_id++;
 
-    /*
-     * Append to the circular run queue.
-     */
     thread->next =
         run_queue_head;
 
@@ -513,6 +609,21 @@ struct kernel_thread *kernel_thread_create(
 
     return thread;
 }
+
+struct kernel_thread *kernel_thread_create(
+    kernel_thread_entry_t entry,
+    void *argument,
+    size_t stack_pages
+)
+{
+    return kernel_thread_create_for_process(
+        kernel_process_kernel(),
+        entry,
+        argument,
+        stack_pages
+    );
+}
+
 
 
 /*
@@ -573,6 +684,49 @@ static uint64_t *schedule_locked(
             scheduler_faulted = true;
         }
 
+        return interrupted_rsp;
+    }
+
+        struct vmm_address_space *candidate_space =
+        kernel_process_address_space(
+            candidate->process
+        );
+
+    if (candidate_space == NULL ||
+        candidate->saved_rsp == NULL ||
+        candidate->ring0_stack_top == 0) {
+        scheduler_faulted = true;
+        return interrupted_rsp;
+    }
+
+    /*
+     * The TSS tells the CPU where to begin the ring-0 stack when an
+     * interrupt arrives from this thread in ring 3.
+     */
+    if (!gdt_set_kernel_stack(
+            candidate->ring0_stack_top
+        )) {
+        scheduler_faulted = true;
+        return interrupted_rsp;
+    }
+
+    /*
+     * Loading CR3 selects the candidate process's translations.
+     *
+     * Both the outgoing and incoming kernel stacks are in the shared
+     * higher-half kernel mapping, so they remain valid across this
+     * operation.
+     */
+    if (!vmm_address_space_is_active(
+            candidate_space
+        )) {
+        vmm_activate(candidate_space);
+    }
+
+    if (!vmm_address_space_is_active(
+            candidate_space
+        )) {
+        scheduler_faulted = true;
         return interrupted_rsp;
     }
 
@@ -891,6 +1045,28 @@ static _Noreturn void kernel_thread_bootstrap(void)
     kernel_thread_exit();
 }
 
+uint64_t kernel_thread_current_process_id(void)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &scheduler_lock
+        );
+
+    uint64_t process_id =
+        current_thread != NULL &&
+        current_thread->process != NULL
+            ? kernel_process_id(
+                current_thread->process
+            )
+            : UINT64_MAX;
+
+    spinlock_unlock_irqrestore(
+        &scheduler_lock,
+        interrupt_state
+    );
+
+    return process_id;
+}
 
 /*
  * Round-robin execution trace:
@@ -1250,4 +1426,344 @@ bool kernel_thread_timer_self_test(void)
         all_threads_terminated &&
         !timer_test_failed &&
         !scheduler_faulted;
+}
+struct process_thread_test_context {
+    uint64_t process_id;
+    uint64_t value;
+
+    volatile bool completed;
+};
+
+static volatile bool process_thread_test_failed;
+
+static void process_thread_test_entry(
+    void *argument
+)
+{
+    struct process_thread_test_context *context =
+        (struct process_thread_test_context *)
+            argument;
+
+    if (context == NULL ||
+        kernel_thread_current_process_id() !=
+            context->process_id) {
+        process_thread_test_failed = true;
+        return;
+    }
+
+    volatile uint64_t *private_value =
+        (volatile uint64_t *)(uintptr_t)
+            USER_SPACE_BASE;
+
+    for (size_t iteration = 0;
+         iteration < 4;
+         iteration++) {
+        *private_value =
+            context->value;
+
+        kernel_thread_yield();
+
+        /*
+         * The other process used the exact same virtual address.
+         * Its write must have reached a different physical frame.
+         */
+        if (*private_value !=
+            context->value) {
+            process_thread_test_failed = true;
+            return;
+        }
+    }
+
+    context->completed = true;
+}
+bool kernel_thread_process_self_test(void)
+{
+    if (!thread_system_initialized) {
+        return false;
+    }
+
+    struct pmm_statistics before;
+    struct pmm_statistics after;
+
+    pmm_get_statistics(&before);
+
+    struct kernel_process *process_a =
+        NULL;
+
+    struct kernel_process *process_b =
+        NULL;
+
+    uint64_t frame_a =
+        PMM_INVALID_ADDRESS;
+
+    uint64_t frame_b =
+        PMM_INVALID_ADDRESS;
+
+    bool mapped_a = false;
+    bool mapped_b = false;
+    bool passed = false;
+
+    uint64_t live_before =
+        kernel_thread_live_count();
+
+    process_thread_test_failed = false;
+
+    process_a =
+        kernel_process_create();
+
+    process_b =
+        kernel_process_create();
+
+    if (process_a == NULL ||
+        process_b == NULL) {
+        goto cleanup;
+    }
+
+    frame_a = pmm_allocate_page();
+    frame_b = pmm_allocate_page();
+
+    if (frame_a == PMM_INVALID_ADDRESS ||
+        frame_b == PMM_INVALID_ADDRESS ||
+        frame_a == frame_b) {
+        goto cleanup;
+    }
+
+    void *frame_a_virtual =
+        pmm_physical_to_virtual(frame_a);
+
+    void *frame_b_virtual =
+        pmm_physical_to_virtual(frame_b);
+
+    if (frame_a_virtual == NULL ||
+        frame_b_virtual == NULL) {
+        goto cleanup;
+    }
+
+    /*
+     * Never expose uninitialized physical memory to a process.
+     */
+    for (size_t index = 0;
+         index < VMM_PAGE_SIZE;
+         index++) {
+        ((uint8_t *)frame_a_virtual)[index] = 0;
+        ((uint8_t *)frame_b_virtual)[index] = 0;
+    }
+
+    uint64_t flags =
+        VMM_PAGE_USER |
+        VMM_PAGE_WRITABLE;
+
+    if (vmm_nx_supported()) {
+        flags |= VMM_PAGE_NO_EXECUTE;
+    }
+
+    struct vmm_address_space *space_a =
+        kernel_process_address_space(
+            process_a
+        );
+
+    struct vmm_address_space *space_b =
+        kernel_process_address_space(
+            process_b
+        );
+
+    if (space_a == NULL ||
+        space_b == NULL) {
+        goto cleanup;
+    }
+
+    if (!vmm_map_page(
+            space_a,
+            USER_SPACE_BASE,
+            frame_a,
+            flags
+        )) {
+        goto cleanup;
+    }
+
+    mapped_a = true;
+
+    if (!vmm_map_page(
+            space_b,
+            USER_SPACE_BASE,
+            frame_b,
+            flags
+        )) {
+        goto cleanup;
+    }
+
+    mapped_b = true;
+
+    struct process_thread_test_context context_a = {
+        .process_id =
+            kernel_process_id(process_a),
+
+        .value =
+            UINT64_C(0xAAAAAAAAAAAAAAAA),
+
+        .completed = false
+    };
+
+    struct process_thread_test_context context_b = {
+        .process_id =
+            kernel_process_id(process_b),
+
+        .value =
+            UINT64_C(0xBBBBBBBBBBBBBBBB),
+
+        .completed = false
+    };
+
+    struct kernel_thread *thread_a =
+        kernel_thread_create_for_process(
+            process_a,
+            process_thread_test_entry,
+            &context_a,
+            4
+        );
+
+    struct kernel_thread *thread_b =
+        kernel_thread_create_for_process(
+            process_b,
+            process_thread_test_entry,
+            &context_b,
+            4
+        );
+
+    if (thread_a == NULL ||
+        thread_b == NULL) {
+        /*
+         * A successfully created thread still needs to execute and
+         * terminate before its process can be cleaned up.
+         */
+        while (kernel_thread_live_count() >
+               live_before) {
+            kernel_thread_yield();
+        }
+
+        goto cleanup;
+    }
+
+    while (kernel_thread_live_count() >
+           live_before) {
+        kernel_thread_yield();
+    }
+
+    kernel_thread_preemption_point();
+
+    /*
+     * We must have returned to PID 0 and its page tables.
+     */
+    if (kernel_thread_current_process_id() != 0 ||
+        !vmm_address_space_is_active(
+            vmm_kernel_address_space()
+        )) {
+        goto cleanup;
+    }
+
+    if (!context_a.completed ||
+        !context_b.completed ||
+        process_thread_test_failed ||
+        kernel_process_thread_count(
+            process_a
+        ) != 0 ||
+        kernel_process_thread_count(
+            process_b
+        ) != 0) {
+        goto cleanup;
+    }
+
+    /*
+     * Each process wrote to the same virtual address, but different
+     * physical frames must contain different values.
+     */
+    if (*(uint64_t *)frame_a_virtual !=
+            context_a.value ||
+        *(uint64_t *)frame_b_virtual !=
+            context_b.value) {
+        goto cleanup;
+    }
+
+    passed = true;
+
+cleanup:
+    /*
+     * Complete any partially created threads before releasing their
+     * process address spaces.
+     */
+    while (kernel_thread_live_count() >
+           live_before) {
+        kernel_thread_yield();
+    }
+
+    kernel_thread_preemption_point();
+
+    if (mapped_a && process_a != NULL) {
+        uint64_t removed;
+
+        if (!vmm_unmap_page(
+                kernel_process_address_space(
+                    process_a
+                ),
+                USER_SPACE_BASE,
+                &removed
+            ) ||
+            removed != frame_a) {
+            passed = false;
+        } else {
+            mapped_a = false;
+        }
+    }
+
+    if (mapped_b && process_b != NULL) {
+        uint64_t removed;
+
+        if (!vmm_unmap_page(
+                kernel_process_address_space(
+                    process_b
+                ),
+                USER_SPACE_BASE,
+                &removed
+            ) ||
+            removed != frame_b) {
+            passed = false;
+        } else {
+            mapped_b = false;
+        }
+    }
+
+    if (!mapped_a &&
+        frame_a != PMM_INVALID_ADDRESS) {
+        if (!pmm_free_page(frame_a)) {
+            passed = false;
+        }
+
+        frame_a = PMM_INVALID_ADDRESS;
+    }
+
+    if (!mapped_b &&
+        frame_b != PMM_INVALID_ADDRESS) {
+        if (!pmm_free_page(frame_b)) {
+            passed = false;
+        }
+
+        frame_b = PMM_INVALID_ADDRESS;
+    }
+
+    if (process_a != NULL &&
+        !kernel_process_destroy(process_a)) {
+        passed = false;
+    }
+
+    if (process_b != NULL &&
+        !kernel_process_destroy(process_b)) {
+        passed = false;
+    }
+
+    pmm_get_statistics(&after);
+
+    return passed &&
+        !process_thread_test_failed &&
+        before.free_pages ==
+            after.free_pages;
 }

@@ -6,6 +6,7 @@
 #include "memory/memory_test.h"
 #include "memory/pmm.h"
 #include "memory/vmm.h"
+#include "drivers/serial.h"
 
 #define SHELL_PROMPT "krishna_> "
 

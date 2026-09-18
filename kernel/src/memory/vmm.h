@@ -66,6 +66,31 @@ bool vmm_protect_page(
     uint64_t flags
 );
 
+/*
+ * Create an empty userspace address space.
+ *
+ * The lower canonical half starts empty and belongs to the process.
+ * The upper canonical half shares the kernel mappings but remains
+ * inaccessible from ring 3.
+ */
+bool vmm_address_space_create(
+    struct vmm_address_space *space
+);
+
+/*
+ * Destroy an inactive, empty userspace address space.
+ *
+ * All userspace mappings must be removed before calling this
+ * function. The shared kernel mappings are never released.
+ */
+bool vmm_address_space_destroy(
+    struct vmm_address_space *space
+);
+
+bool vmm_address_space_is_active(
+    const struct vmm_address_space *space
+);
+
 void vmm_activate(struct vmm_address_space *space);
 bool vmm_nx_supported(void);
 

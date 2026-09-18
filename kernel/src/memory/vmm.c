@@ -16,6 +16,7 @@
 #define PAGE_LARGE (UINT64_C(1) << 7)
 #define PAGE_OWNED (UINT64_C(1) << 9)
 #define PAGE_NO_EXECUTE (UINT64_C(1) << 63)
+#define PML4_KERNEL_FIRST_INDEX ((size_t)256)
 
 #define IA32_EFER UINT32_C(0xC0000080)
 #define IA32_EFER_NXE (UINT64_C(1) << 11)
@@ -685,6 +686,202 @@ bool vmm_take_ownership(void)
 struct vmm_address_space *vmm_kernel_address_space(void)
 {
     return vmm_ready ? &kernel_space : NULL;
+}
+
+static bool vmm_address_space_create_locked(
+    struct vmm_address_space *space
+)
+{
+    if (!vmm_ready ||
+        !kernel_page_tables_owned ||
+        space == NULL ||
+        space->pml4_physical != 0) {
+        return false;
+    }
+
+    uint64_t new_pml4_physical =
+        pmm_allocate_page();
+
+    if (new_pml4_physical ==
+        PMM_INVALID_ADDRESS) {
+        return false;
+    }
+
+    uint64_t *new_pml4 =
+        table_virtual(new_pml4_physical);
+
+    uint64_t *kernel_pml4 =
+        table_virtual(
+            kernel_space.pml4_physical
+        );
+
+    if (new_pml4 == NULL ||
+        kernel_pml4 == NULL) {
+        pmm_free_page(new_pml4_physical);
+        return false;
+    }
+
+    memset(
+        new_pml4,
+        0,
+        VMM_PAGE_SIZE
+    );
+
+    /*
+     * PML4 entries 0-255 cover the lower canonical half and remain
+     * empty. They will contain this process's private userspace.
+     *
+     * Entries 256-511 cover the upper canonical half. Share those
+     * mappings so the kernel, HHDM, kernel stacks, heap and MMIO
+     * remain available after switching CR3.
+     */
+    for (size_t index =
+             PML4_KERNEL_FIRST_INDEX;
+         index < PAGE_ENTRY_COUNT;
+         index++) {
+        /*
+         * Clear PAGE_USER at the highest level. Even if a lower
+         * kernel mapping accidentally contains PAGE_USER, ring 3
+         * cannot pass this PML4 entry.
+         */
+        new_pml4[index] =
+            kernel_pml4[index] &
+            ~PAGE_USER;
+    }
+
+    space->pml4_physical =
+        new_pml4_physical;
+
+    return true;
+}
+
+bool vmm_address_space_create(
+    struct vmm_address_space *space
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &vmm_lock
+        );
+
+    bool created =
+        vmm_address_space_create_locked(
+            space
+        );
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return created;
+}
+
+static bool vmm_address_space_destroy_locked(
+    struct vmm_address_space *space
+)
+{
+    if (!vmm_ready ||
+        space == NULL ||
+        space == &kernel_space ||
+        space->pml4_physical == 0 ||
+        space->pml4_physical ==
+            kernel_space.pml4_physical) {
+        return false;
+    }
+
+    /*
+     * Never destroy the currently active hierarchy.
+     */
+    uint64_t active_pml4 =
+        read_cr3() & PAGE_ADDRESS_MASK;
+
+    if (active_pml4 ==
+        space->pml4_physical) {
+        return false;
+    }
+
+    uint64_t *pml4 =
+        table_virtual(
+            space->pml4_physical
+        );
+
+    if (pml4 == NULL) {
+        return false;
+    }
+
+    /*
+     * Every userspace mapping must already have been unmapped.
+     *
+     * vmm_unmap_page_locked() automatically reclaims empty PT, PD
+     * and PDPT pages, so all lower-half PML4 entries should now be
+     * absent.
+     */
+    for (size_t index = 0;
+         index < PML4_KERNEL_FIRST_INDEX;
+         index++) {
+        if ((pml4[index] &
+             PAGE_PRESENT) != 0) {
+            return false;
+        }
+    }
+
+    uint64_t old_pml4 =
+        space->pml4_physical;
+
+    if (!pmm_free_page(old_pml4)) {
+        return false;
+    }
+
+    space->pml4_physical = 0;
+
+    return true;
+}
+
+bool vmm_address_space_destroy(
+    struct vmm_address_space *space
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &vmm_lock
+        );
+
+    bool destroyed =
+        vmm_address_space_destroy_locked(
+            space
+        );
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return destroyed;
+}
+
+bool vmm_address_space_is_active(
+    const struct vmm_address_space *space
+)
+{
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(
+            &vmm_lock
+        );
+
+    bool active =
+        vmm_ready &&
+        space != NULL &&
+        space->pml4_physical != 0 &&
+        (read_cr3() & PAGE_ADDRESS_MASK) ==
+            space->pml4_physical;
+
+    spinlock_unlock_irqrestore(
+        &vmm_lock,
+        interrupt_state
+    );
+
+    return active;
 }
 
 static bool vmm_map_page_locked(

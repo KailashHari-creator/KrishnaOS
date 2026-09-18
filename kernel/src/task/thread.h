@@ -20,7 +20,7 @@ enum kernel_thread_state {
 
 
 struct kernel_thread;
-
+struct kernel_process;
 
 /*
  * Register the currently executing boot context as thread zero.
@@ -106,6 +106,26 @@ void kernel_thread_preemption_point(void);
  * Return the number of scheduler timer ticks observed.
  */
 uint64_t kernel_thread_scheduler_ticks(void);
+
+/*
+ * Create a kernel-mode thread owned by a specific process.
+ *
+ * The thread executes kernel code but uses the process's page-table
+ * hierarchy. This is the intermediate step before ring-3 threads.
+ */
+struct kernel_thread *kernel_thread_create_for_process(
+    struct kernel_process *process,
+    kernel_thread_entry_t entry,
+    void *argument,
+    size_t stack_pages
+);
+
+uint64_t kernel_thread_current_process_id(void);
+
+/*
+ * Verify scheduling between two independent process address spaces.
+ */
+bool kernel_thread_process_self_test(void);
 
 /*
  * Verify forced timer-driven round-robin scheduling.
