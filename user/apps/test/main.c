@@ -5,6 +5,8 @@
 #include <krishna/io.h>
 #include <krishna/process.h>
 #include <krishna/syscall.h>
+#include <krishna/device.h>
+#include <krishna/memory.h>
 
 #define EXPECTED_EXIT_STATUS 42
 #define FAILURE_EXIT_STATUS  99
@@ -169,6 +171,91 @@ int main(void)
 
     if (invalid_read_result !=
         -KRISHNA_ERROR_ACCESS_FAULT) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+        struct krishna_framebuffer_info
+        framebuffer_info;
+
+    int64_t framebuffer_info_result =
+        krishna_ioctl(
+            KRISHNA_HANDLE_FRAMEBUFFER,
+            KRISHNA_FRAMEBUFFER_IOCTL_GET_INFO,
+            &framebuffer_info,
+            sizeof(framebuffer_info)
+        );
+
+    if (framebuffer_info_result !=
+        (int64_t)sizeof(framebuffer_info)) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    int64_t framebuffer_mapping =
+        krishna_memory_map(
+            KRISHNA_HANDLE_FRAMEBUFFER,
+            NULL,
+            (size_t)
+                framebuffer_info.byte_size,
+            0,
+            KRISHNA_MEMORY_PROTECTION_READ |
+                KRISHNA_MEMORY_PROTECTION_WRITE,
+            0
+        );
+
+    if (framebuffer_mapping < 0) {
+        return FAILURE_EXIT_STATUS;
+    }
+
+    volatile uint8_t *framebuffer_bytes =
+        (volatile uint8_t *)(uintptr_t)
+            framebuffer_mapping;
+
+    uint32_t test_colour =
+        (UINT32_C(255) <<
+            framebuffer_info.red_mask_shift) |
+        (UINT32_C(32) <<
+            framebuffer_info.green_mask_shift) |
+        (UINT32_C(180) <<
+            framebuffer_info.blue_mask_shift);
+
+    /*
+     * Draw a 64×64 magenta marker in the upper-left corner.
+     * This is the first framebuffer rendering performed from Ring 3.
+     */
+    uint64_t test_width =
+        framebuffer_info.width < 64
+            ? framebuffer_info.width
+            : 64;
+
+    uint64_t test_height =
+        framebuffer_info.height < 64
+            ? framebuffer_info.height
+            : 64;
+
+    for (uint64_t y = 0;
+         y < test_height;
+         y++) {
+        volatile uint32_t *row =
+            (volatile uint32_t *)
+            (void *)(
+                framebuffer_bytes +
+                y * framebuffer_info.pitch
+            );
+
+        for (uint64_t x = 0;
+             x < test_width;
+             x++) {
+            row[x] = test_colour;
+        }
+    }
+
+    if (krishna_memory_unmap(
+            KRISHNA_HANDLE_FRAMEBUFFER,
+            (void *)(uintptr_t)
+                framebuffer_mapping,
+            (size_t)
+                framebuffer_info.byte_size
+        ) != 0) {
         return FAILURE_EXIT_STATUS;
     }
 

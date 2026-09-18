@@ -22,6 +22,7 @@
 #include "sync/spinlock.h"
 #include "task/thread.h"
 #include "task/process.h"
+#include "object/framebuffer.h"
 #include "arch/x86_64/apic.h"
 #include "arch/x86_64/gdt.h"
 #include "syscall.h"
@@ -874,6 +875,20 @@ void kmain(void)
 
     serial_write(
         "[OK] PS/2 mouse polling enabled\n"
+    );
+
+    if (!framebuffer_object_init(
+        framebuffer
+    )) {
+        serial_write(
+            "[FAIL] Framebuffer object initialization failed\n"
+        );
+
+        kernel_halt();
+    }
+
+    serial_write(
+        "[OK] Framebuffer object initialized\n"
     );
 
     if (!syscall_init()) {

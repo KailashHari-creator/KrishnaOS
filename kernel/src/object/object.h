@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 struct kernel_object;
+struct kernel_process;
 
 struct kernel_object_operations {
     int64_t (*read)(
@@ -18,6 +19,30 @@ struct kernel_object_operations {
         void *context,
         const void *buffer,
         size_t size
+    );
+
+        int64_t (*ioctl)(
+        void *context,
+        uint64_t request,
+        void *buffer,
+        size_t size
+    );
+
+    int64_t (*map)(
+        void *context,
+        struct kernel_process *process,
+        uint64_t requested_address,
+        uint64_t offset,
+        uint64_t length,
+        uint64_t protection,
+        uint64_t flags
+    );
+
+    int64_t (*unmap)(
+        void *context,
+        struct kernel_process *process,
+        uint64_t address,
+        uint64_t length
     );
 
     void (*destroy)(
@@ -55,6 +80,30 @@ int64_t kernel_object_write(
     struct kernel_object *object,
     const void *buffer,
     size_t size
+);
+
+int64_t kernel_object_ioctl(
+    struct kernel_object *object,
+    uint64_t request,
+    void *buffer,
+    size_t size
+);
+
+int64_t kernel_object_map(
+    struct kernel_object *object,
+    struct kernel_process *process,
+    uint64_t requested_address,
+    uint64_t offset,
+    uint64_t length,
+    uint64_t protection,
+    uint64_t flags
+);
+
+int64_t kernel_object_unmap(
+    struct kernel_object *object,
+    struct kernel_process *process,
+    uint64_t address,
+    uint64_t length
 );
 
 #endif

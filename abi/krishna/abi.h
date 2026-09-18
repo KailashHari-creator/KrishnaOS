@@ -1,5 +1,5 @@
 #include <stdint.h>
-
+#include <stddef.h>
 #ifndef KRISHNA_ABI_H
 #define KRISHNA_ABI_H
 
@@ -94,6 +94,37 @@ struct krishna_mouse_event {
     int16_t delta_y;
     uint8_t buttons;
     uint8_t reserved[3];
+};
+
+#define KRISHNA_HANDLE_FRAMEBUFFER 5
+
+#define KRISHNA_FRAMEBUFFER_IOCTL_GET_INFO \
+    UINT64_C(0x4600)
+
+#define KRISHNA_MEMORY_PROTECTION_READ \
+    (UINT64_C(1) << 0)
+
+#define KRISHNA_MEMORY_PROTECTION_WRITE \
+    (UINT64_C(1) << 1)
+
+struct krishna_framebuffer_info {
+    uint64_t width;
+    uint64_t height;
+    uint64_t pitch;
+    uint64_t byte_size;
+
+    uint32_t bits_per_pixel;
+
+    uint8_t red_mask_shift;
+    uint8_t red_mask_size;
+
+    uint8_t green_mask_shift;
+    uint8_t green_mask_size;
+
+    uint8_t blue_mask_shift;
+    uint8_t blue_mask_size;
+
+    uint8_t reserved[6];
 };
 
 #endif

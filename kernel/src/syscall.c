@@ -18,6 +18,7 @@ extern void arch_syscall_interrupt_entry(void);
 #define SYSCALL_MAX_WRITE_SIZE    ((size_t)4096)
 #define SYSCALL_READ_BUFFER_SIZE ((size_t)128)
 #define SYSCALL_MAX_READ_SIZE    ((size_t)4096)
+#define SYSCALL_IOCTL_BUFFER_SIZE ((size_t)256)
 
 typedef int64_t (*syscall_handler_t)(
     uint64_t argument_1,
@@ -26,6 +27,33 @@ typedef int64_t (*syscall_handler_t)(
     uint64_t argument_4,
     uint64_t argument_5,
     uint64_t argument_6
+);
+
+static int64_t syscall_handle_ioctl(
+    uint64_t handle,
+    uint64_t request,
+    uint64_t user_buffer,
+    uint64_t size,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+);
+
+static int64_t syscall_handle_memory_map(
+    uint64_t handle,
+    uint64_t requested_address,
+    uint64_t length,
+    uint64_t offset,
+    uint64_t protection,
+    uint64_t flags
+);
+
+static int64_t syscall_handle_memory_unmap(
+    uint64_t handle,
+    uint64_t address,
+    uint64_t length,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
 );
 
 static uint64_t completed_exit_count;
@@ -398,6 +426,15 @@ static const syscall_handler_t syscall_table[
     [KRISHNA_SYSCALL_WRITE] =
         syscall_handle_write,
 
+    [KRISHNA_SYSCALL_MEMORY_MAP] =
+        syscall_handle_memory_map,
+
+    [KRISHNA_SYSCALL_MEMORY_UNMAP] =
+        syscall_handle_memory_unmap,
+
+    [KRISHNA_SYSCALL_IOCTL] =
+        syscall_handle_ioctl,
+
     [KRISHNA_SYSCALL_GETPID] =
         syscall_handle_getpid,
 
@@ -547,4 +584,177 @@ uint64_t syscall_last_exit_process_id(void)
         &last_exit_process_id,
         __ATOMIC_ACQUIRE
     );
+}
+
+static int64_t syscall_handle_ioctl(
+    uint64_t handle,
+    uint64_t request,
+    uint64_t user_buffer,
+    uint64_t size,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_5;
+    (void)ignored_6;
+
+    if (size >
+        SYSCALL_IOCTL_BUFFER_SIZE) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    if (process == NULL) {
+        return -KRISHNA_ERROR_NO_SUCH_PROCESS;
+    }
+
+    struct kernel_object *object =
+        kernel_process_handle_acquire(
+            process,
+            handle,
+            KERNEL_HANDLE_RIGHT_IOCTL
+        );
+
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    uint8_t buffer[SYSCALL_IOCTL_BUFFER_SIZE];
+
+    for (size_t index = 0;
+         index < (size_t)size;
+         index++) {
+        buffer[index] = 0;
+    }
+
+    if (size != 0) {
+        if (!user_buffer_validate(
+                (void *)(uintptr_t)user_buffer,
+                (size_t)size,
+                true
+            ) ||
+            !copy_from_user(
+                buffer,
+                (const void *)(uintptr_t)
+                    user_buffer,
+                (size_t)size
+            )) {
+            kernel_object_release(object);
+            return -KRISHNA_ERROR_ACCESS_FAULT;
+        }
+    }
+
+    int64_t result =
+        kernel_object_ioctl(
+            object,
+            request,
+            buffer,
+            (size_t)size
+        );
+
+    if (result > 0) {
+        if ((uint64_t)result > size) {
+            kernel_object_release(object);
+            return -KRISHNA_ERROR_IO;
+        }
+
+        if (!copy_to_user(
+                (void *)(uintptr_t)user_buffer,
+                buffer,
+                (size_t)result
+            )) {
+            kernel_object_release(object);
+            return -KRISHNA_ERROR_ACCESS_FAULT;
+        }
+    }
+
+    kernel_object_release(object);
+    return result;
+}
+
+static int64_t syscall_handle_memory_map(
+    uint64_t handle,
+    uint64_t requested_address,
+    uint64_t length,
+    uint64_t offset,
+    uint64_t protection,
+    uint64_t flags
+)
+{
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    if (process == NULL) {
+        return -KRISHNA_ERROR_NO_SUCH_PROCESS;
+    }
+
+    struct kernel_object *object =
+        kernel_process_handle_acquire(
+            process,
+            handle,
+            KERNEL_HANDLE_RIGHT_MAP
+        );
+
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    int64_t result =
+        kernel_object_map(
+            object,
+            process,
+            requested_address,
+            offset,
+            length,
+            protection,
+            flags
+        );
+
+    kernel_object_release(object);
+    return result;
+}
+
+static int64_t syscall_handle_memory_unmap(
+    uint64_t handle,
+    uint64_t address,
+    uint64_t length,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_4;
+    (void)ignored_5;
+    (void)ignored_6;
+
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    if (process == NULL) {
+        return -KRISHNA_ERROR_NO_SUCH_PROCESS;
+    }
+
+    struct kernel_object *object =
+        kernel_process_handle_acquire(
+            process,
+            handle,
+            KERNEL_HANDLE_RIGHT_MAP
+        );
+
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    int64_t result =
+        kernel_object_unmap(
+            object,
+            process,
+            address,
+            length
+        );
+
+    kernel_object_release(object);
+    return result;
 }

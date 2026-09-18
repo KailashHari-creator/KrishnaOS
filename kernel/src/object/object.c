@@ -152,3 +152,95 @@ int64_t kernel_object_write(
         size
     );
 }
+
+int64_t kernel_object_ioctl(
+    struct kernel_object *object,
+    uint64_t request,
+    void *buffer,
+    size_t size
+)
+{
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    if (size != 0 && buffer == NULL) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (object->operations == NULL ||
+        object->operations->ioctl == NULL) {
+        return -KRISHNA_ERROR_NOT_IMPLEMENTED;
+    }
+
+    return object->operations->ioctl(
+        object->context,
+        request,
+        buffer,
+        size
+    );
+}
+
+int64_t kernel_object_map(
+    struct kernel_object *object,
+    struct kernel_process *process,
+    uint64_t requested_address,
+    uint64_t offset,
+    uint64_t length,
+    uint64_t protection,
+    uint64_t flags
+)
+{
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    if (process == NULL ||
+        length == 0) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (object->operations == NULL ||
+        object->operations->map == NULL) {
+        return -KRISHNA_ERROR_NOT_IMPLEMENTED;
+    }
+
+    return object->operations->map(
+        object->context,
+        process,
+        requested_address,
+        offset,
+        length,
+        protection,
+        flags
+    );
+}
+
+int64_t kernel_object_unmap(
+    struct kernel_object *object,
+    struct kernel_process *process,
+    uint64_t address,
+    uint64_t length
+)
+{
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    if (process == NULL ||
+        length == 0) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (object->operations == NULL ||
+        object->operations->unmap == NULL) {
+        return -KRISHNA_ERROR_NOT_IMPLEMENTED;
+    }
+
+    return object->operations->unmap(
+        object->context,
+        process,
+        address,
+        length
+    );
+}
