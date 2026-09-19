@@ -20,4 +20,13 @@ embedded_desktop_elf_start:
 
 embedded_desktop_elf_end:
 
+global embedded_terminal_elf_start
+global embedded_terminal_elf_end
+
+align 16
+
+embedded_terminal_elf_start:
+    incbin "../user/bin/terminal.elf"
+embedded_terminal_elf_end:
+
 section .note.GNU-stack noalloc noexec nowrite progbits

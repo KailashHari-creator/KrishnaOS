@@ -36,6 +36,15 @@ krishna_font_start:
     .incbin "../assets/krishna_font.kfont"
 krishna_font_end:
 
+.align 16
+
+.global krishna_logo_start
+.global krishna_logo_end
+
+krishna_logo_start:
+    .incbin "../assets/krishna_logo.rgba"
+krishna_logo_end:
+
 .balign 16
 .global krishna_terminal_art_start
 .global krishna_terminal_art_end

@@ -25,6 +25,20 @@ int64_t krishna_write(
     );
 }
 
+int64_t krishna_sleep(
+    uint64_t milliseconds
+)
+{
+    return krishna_syscall6(
+        KRISHNA_SYSCALL_SLEEP,
+        milliseconds,
+        0,
+        0,
+        0,
+        0,
+        0
+    );
+}
 
 _Noreturn void krishna_exit(
     int64_t status
@@ -158,6 +172,22 @@ int64_t krishna_memory_unmap(
         handle,
         (uint64_t)(uintptr_t)address,
         (uint64_t)length,
+        0,
+        0,
+        0
+    );
+}
+
+int64_t krishna_process_spawn(
+    const char *path,
+    size_t path_length
+)
+{
+    return krishna_syscall6(
+        KRISHNA_SYSCALL_PROCESS_SPAWN,
+        (uint64_t)(uintptr_t)path,
+        (uint64_t)path_length,
+        0,
         0,
         0,
         0

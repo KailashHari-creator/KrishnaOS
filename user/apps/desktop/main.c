@@ -16,6 +16,12 @@
 #define CURSOR_WIDTH  UINT64_C(20)
 #define CURSOR_HEIGHT UINT64_C(28)
 
+#define KRISHNA_LOGO_WIDTH  UINT64_C(627)
+#define KRISHNA_LOGO_HEIGHT UINT64_C(527)
+
+extern const uint8_t krishna_logo_start[];
+extern const uint8_t krishna_logo_end[];
+
 extern const uint8_t krishna_wallpaper_start[];
 extern const uint8_t krishna_wallpaper_end[];
 
@@ -109,6 +115,156 @@ static bool cursor_initialize(
         ) / 2;
 
     cursor->visible = false;
+
+    return true;
+}
+
+static void loading_screen_progress(
+    struct graphics_context *graphics,
+    uint8_t percentage
+)
+{
+    if (percentage > 100) {
+        percentage = 100;
+    }
+
+    uint64_t bar_width =
+        graphics->info.width / 2;
+
+    if (bar_width > 600) {
+        bar_width = 600;
+    }
+
+    uint64_t bar_x =
+        (
+            graphics->info.width -
+            bar_width
+        ) / 2;
+
+    uint64_t bar_y =
+        graphics->info.height - 70;
+
+    uint32_t border =
+        graphics_rgb(
+            graphics,
+            8,
+            35,
+            55
+        );
+
+    uint32_t empty =
+        graphics_rgb(
+            graphics,
+            34,
+            91,
+            120
+        );
+
+    uint32_t filled =
+        graphics_rgb(
+            graphics,
+            250,
+            207,
+            71
+        );
+
+    graphics_rectangle(
+        graphics,
+        bar_x,
+        bar_y,
+        bar_width,
+        18,
+        border
+    );
+
+    graphics_rectangle(
+        graphics,
+        bar_x + 3,
+        bar_y + 3,
+        bar_width - 6,
+        12,
+        empty
+    );
+
+    uint64_t completed_width =
+        (
+            (bar_width - 6) *
+            percentage
+        ) / 100;
+
+    graphics_rectangle(
+        graphics,
+        bar_x + 3,
+        bar_y + 3,
+        completed_width,
+        12,
+        filled
+    );
+}
+
+static bool loading_screen_show(
+    struct graphics_context *graphics
+)
+{
+    size_t logo_size =
+        (size_t)(
+            krishna_logo_end -
+            krishna_logo_start
+        );
+
+    size_t expected_logo_size =
+        (size_t)KRISHNA_LOGO_WIDTH *
+        (size_t)KRISHNA_LOGO_HEIGHT *
+        4;
+
+    if (graphics == NULL ||
+        logo_size != expected_logo_size) {
+        return false;
+    }
+
+    uint32_t background =
+        graphics_rgb(
+            graphics,
+            51,
+            170,
+            238
+        );
+
+    graphics_rectangle(
+        graphics,
+        0,
+        0,
+        graphics->info.width,
+        graphics->info.height,
+        background
+    );
+
+    uint64_t logo_x = 0;
+
+    if (graphics->info.width >
+        KRISHNA_LOGO_WIDTH) {
+        logo_x =
+            (
+                graphics->info.width -
+                KRISHNA_LOGO_WIDTH
+            ) / 2;
+    }
+
+    uint64_t logo_y = 20;
+
+    graphics_blit_rgba(
+        graphics,
+        logo_x,
+        logo_y,
+        krishna_logo_start,
+        KRISHNA_LOGO_WIDTH,
+        KRISHNA_LOGO_HEIGHT
+    );
+
+    loading_screen_progress(
+        graphics,
+        10
+    );
 
     return true;
 }
@@ -249,6 +405,7 @@ static void write_message(
 
 int main(void)
 {
+    int64_t terminal_process_id = -1;
     static const char started_message[] =
         "[DESKTOP] Ring-3 desktop started\n";
 
@@ -302,6 +459,14 @@ int main(void)
         );
     }
 
+    if (!loading_screen_show(&graphics)) {
+        DESKTOP_FAILURE(
+            "[DESKTOP] loading screen failed\n"
+        );
+    }
+
+    (void)krishna_sleep(250);
+
         if (framebuffer_info.byte_size !=
         sizeof(desktop_backbuffer) ||
         framebuffer_info.pitch !=
@@ -324,6 +489,13 @@ int main(void)
         );
     }
 
+    loading_screen_progress(
+        &graphics,
+        40
+    );
+
+    (void)krishna_sleep(200);
+
     struct desktop_frontend desktop;
 
     if (!desktop_frontend_initialize(
@@ -335,7 +507,42 @@ int main(void)
         );
     }
 
+    loading_screen_progress(
+        &graphics,
+        75
+    );
+
+    (void)krishna_sleep(200);
+
+    struct desktop_cursor cursor;
+
+    if (!cursor_initialize(&cursor, &graphics)) {
+        DESKTOP_FAILURE(
+            "[DESKTOP] cursor initialization failed\n"
+        );
+    }
+
+    bool previous_left_button = false;
+
+    write_message(
+        started_message,
+        sizeof(started_message) - 1
+    );
+
+    loading_screen_progress(
+        &graphics,
+        100
+    );
+
+    /*
+    * Hold the completed loading screen long enough to actually see the
+    * logo and completed progress bar.
+    */
+    (void)krishna_sleep(650);
+
     desktop_frontend_render(&desktop);
+
+    cursor_show(&cursor);
 
     if (!graphics_present(
         &graphics,
@@ -346,22 +553,7 @@ int main(void)
         );
     }
 
-    struct desktop_cursor cursor;
 
-    if (!cursor_initialize(&cursor, &graphics)) {
-        DESKTOP_FAILURE(
-            "[DESKTOP] cursor initialization failed\n"
-        );
-    }
-
-    cursor_show(&cursor);
-
-    bool previous_left_button = false;
-
-    write_message(
-        started_message,
-        sizeof(started_message) - 1
-    );
 
     for (;;) {
         bool handled_event = false;
@@ -481,27 +673,48 @@ int main(void)
                 keyboard_event
             )) {
             handled_event = true;
+
+            bool frontend_changed = false;
+
+            /*
+            * Escape remains a desktop/window-manager shortcut.
+            */
             if (keyboard_event.pressed &&
-                keyboard_event.scancode == 0x01 &&
-                desktop_frontend_close_terminal(
-                    &desktop
-                )) {
-                    cursor_hide(&cursor);
-
-                    desktop_frontend_render(&desktop);
-
-                    if (!graphics_present(
-                            &graphics,
-                            &desktop_graphics
-                        )) {
-                        DESKTOP_FAILURE(
-                            "[DESKTOP] frame presentation failed\n"
-                        );
-                    }
-
-                    cursor_show(&cursor);
+                keyboard_event.scancode == 0x01) {
+                frontend_changed =
+                    desktop_frontend_close_terminal(
+                        &desktop
+                    );
+            } else {
+                /*
+                * All other keyboard events are offered to the focused
+                * terminal frontend.
+                */
+                frontend_changed =
+                    desktop_frontend_handle_key(
+                        &desktop,
+                        &keyboard_event
+                    );
             }
 
+            if (frontend_changed) {
+                cursor_hide(&cursor);
+
+                desktop_frontend_render(
+                    &desktop
+                );
+
+                if (!graphics_present(
+                        &graphics,
+                        &desktop_graphics
+                    )) {
+                    DESKTOP_FAILURE(
+                        "[DESKTOP] frame presentation failed\n"
+                    );
+                }
+
+                cursor_show(&cursor);
+            }
         } else if (
             keyboard_result !=
                 -KRISHNA_ERROR_WOULD_BLOCK

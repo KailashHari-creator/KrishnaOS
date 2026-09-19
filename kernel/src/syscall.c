@@ -4,13 +4,15 @@
 #include <stdint.h>
 
 #include "arch/x86_64/context_switch.h"
+#include "arch/x86_64/apic.h"
 #include "interrupts.h"
 #include "task/thread.h"
+#include "task/user.h"
+#include "task/process.h"
 #include "user_copy.h"
 #include "object/object.h"
 #include "object/serial_console.h"
 #include "object/input.h"
-#include "task/process.h"
 
 extern void arch_syscall_interrupt_entry(void);
 
@@ -19,6 +21,7 @@ extern void arch_syscall_interrupt_entry(void);
 #define SYSCALL_READ_BUFFER_SIZE ((size_t)128)
 #define SYSCALL_MAX_READ_SIZE    ((size_t)4096)
 #define SYSCALL_IOCTL_BUFFER_SIZE ((size_t)256)
+#define SYSCALL_MAX_PATH_SIZE ((size_t)128)
 
 typedef int64_t (*syscall_handler_t)(
     uint64_t argument_1,
@@ -410,6 +413,109 @@ static int64_t syscall_handle_yield(
     return 0;
 }
 
+static int64_t syscall_handle_sleep(
+    uint64_t milliseconds,
+    uint64_t ignored_2,
+    uint64_t ignored_3,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_2;
+    (void)ignored_3;
+    (void)ignored_4;
+    (void)ignored_5;
+    (void)ignored_6;
+
+    /*
+     * Prevent overflow and absurdly long sleeps for now.
+     * This limit can be removed when a proper timer wait queue exists.
+     */
+    if (milliseconds > UINT64_C(86400000)) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (milliseconds == 0) {
+        kernel_thread_yield();
+        return 0;
+    }
+
+    uint64_t frequency =
+        local_apic_timer_frequency();
+
+    if (frequency == 0) {
+        return -KRISHNA_ERROR_IO;
+    }
+
+    uint64_t duration_ticks =
+        (
+            milliseconds * frequency +
+            UINT64_C(999)
+        ) /
+        UINT64_C(1000);
+
+    if (duration_ticks == 0) {
+        duration_ticks = 1;
+    }
+
+    uint64_t start_ticks =
+        local_apic_timer_ticks();
+
+    while (
+        local_apic_timer_ticks() -
+        start_ticks <
+        duration_ticks
+    ) {
+        /*
+         * This is cooperative sleep for now. Other threads continue
+         * executing while this thread repeatedly yields.
+         *
+         * Later we will replace this with a timer wait queue and block
+         * the thread instead of repeatedly scheduling it.
+         */
+        kernel_thread_yield();
+    }
+
+    return 0;
+}
+
+static int64_t syscall_handle_process_spawn(
+    uint64_t user_path,
+    uint64_t path_length,
+    uint64_t ignored_3,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_3;
+    (void)ignored_4;
+    (void)ignored_5;
+    (void)ignored_6;
+
+    if (path_length == 0 ||
+        path_length >= SYSCALL_MAX_PATH_SIZE) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    char path[SYSCALL_MAX_PATH_SIZE];
+
+    if (!copy_from_user(
+            path,
+            (const void *)(uintptr_t)user_path,
+            (size_t)path_length
+        )) {
+        return -KRISHNA_ERROR_ACCESS_FAULT;
+    }
+
+    path[path_length] = '\0';
+
+    return user_application_spawn(
+        path,
+        (size_t)path_length
+    );
+}
 
 /*
  * Unimplemented entries remain NULL and produce -ENOSYS.
@@ -441,8 +547,14 @@ static const syscall_handler_t syscall_table[
     [KRISHNA_SYSCALL_YIELD] =
         syscall_handle_yield,
     
+    [KRISHNA_SYSCALL_SLEEP] =
+        syscall_handle_sleep,
+
     [KRISHNA_SYSCALL_CLOSE] =
-        syscall_handle_close
+        syscall_handle_close,
+        
+    [KRISHNA_SYSCALL_PROCESS_SPAWN] =
+        syscall_handle_process_spawn
 };
 
 static uint64_t syscall_interrupt_save_disable(void)

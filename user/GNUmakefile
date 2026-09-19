@@ -65,6 +65,12 @@ DESKTOP_CFILES := \
 DESKTOP_ASFILES := \
 	apps/desktop/assets.S
 
+TERMINAL_CFILES := \
+	apps/terminal/main.c
+
+TERMINAL_OBJECTS := \
+	$(patsubst %.c,obj/%.c.o,$(TERMINAL_CFILES))
+
 COMMON_OBJECTS := \
 	$(addprefix obj/,$(COMMON_CFILES:.c=.c.o)) \
 	$(addprefix obj/,$(COMMON_ASFILES:.S=.S.o))
@@ -83,10 +89,13 @@ DEPENDENCIES := \
 	$(addprefix obj/,$(TEST_CFILES:.c=.c.d)) \
 	$(addprefix obj/,$(DESKTOP_CFILES:.c=.c.d))
 
+DEPENDENCIES += $(TERMINAL_OBJECTS:.o=.d)
+
 .PHONY: all
 all: \
 	bin/user_test.elf \
-	bin/desktop.elf
+	bin/desktop.elf \
+	bin/terminal.elf
 
 -include $(DEPENDENCIES)
 
@@ -103,6 +112,12 @@ bin/desktop.elf: \
 	GNUmakefile
 	mkdir -p "$(dir $@)"
 	$(LD) $(LDFLAGS) $(DESKTOP_OBJECTS) -o $@
+
+bin/terminal.elf: \
+	$(TERMINAL_OBJECTS) \
+	linker.ld \
+	@mkdir -p "$(dir $@)"
+	$(LD) $(LDFLAGS) $(TERMINAL_OBJECTS) -o $@
 
 obj/%.c.o: %.c GNUmakefile
 	mkdir -p "$(dir $@)"

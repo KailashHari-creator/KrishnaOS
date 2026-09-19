@@ -1003,13 +1003,31 @@ static void draw_terminal_window(
         255
     );
 
+    uint64_t input_x =
+        prompt_x +
+        text_width(desktop, prompt);
+
+    draw_text(
+        desktop,
+        input_x,
+        prompt_y,
+        desktop->terminal_input,
+        225,
+        242,
+        248,
+        255
+    );
+
     /*
      * Position the cursor from the actual prompt width rather than
      * using a hard-coded coordinate.
      */
     uint64_t cursor_x =
-        prompt_x +
-        text_width(desktop, prompt) +
+        input_x +
+        text_width(
+            desktop,
+            desktop->terminal_input
+        ) +
         4;
 
     graphics_rounded_rectangle(
@@ -1196,6 +1214,12 @@ bool desktop_frontend_initialize(
     desktop->terminal_open =
         false;
 
+    desktop->terminal_input_length = 
+        0;
+
+    desktop->terminal_input[0] = 
+        '\0';
+
     return true;
 }
 
@@ -1299,6 +1323,99 @@ bool desktop_frontend_close_terminal(
     }
 
     desktop->terminal_open = false;
+
+    return true;
+}
+bool desktop_frontend_handle_key(
+    struct desktop_frontend *desktop,
+    const struct krishna_keyboard_event *event
+)
+{
+    if (desktop == NULL ||
+        event == NULL ||
+        !desktop->terminal_open ||
+        event->pressed == 0) {
+        return false;
+    }
+
+    uint8_t character =
+        event->character;
+
+    /*
+     * Backspace.
+     */
+    if (character == '\b') {
+        if (desktop->terminal_input_length == 0) {
+            return false;
+        }
+
+        desktop->terminal_input_length--;
+
+        desktop->terminal_input[
+            desktop->terminal_input_length
+        ] = '\0';
+
+        return true;
+    }
+
+    /*
+     * Enter will be forwarded to the real terminal process once that
+     * process and its IPC channel exist. For now, preserve the typed
+     * line instead of silently deleting it.
+     */
+    if (character == '\n') {
+        return false;
+    }
+
+    /*
+     * Accept printable ASCII.
+     */
+    if (character < 32 ||
+        character > 126) {
+        return false;
+    }
+
+    if (desktop->terminal_input_length >=
+        DESKTOP_TERMINAL_INPUT_CAPACITY - 1) {
+        return false;
+    }
+
+    /*
+     * Prevent text from reaching the scrollbar/right edge.
+     */
+    static const char prompt[] =
+        "kailash@krishna:~$ ";
+
+    uint64_t prompt_width =
+        text_width(
+            desktop,
+            prompt
+        );
+
+    uint64_t existing_width =
+        desktop->terminal_input_length *
+        desktop->font.glyph_width;
+
+    uint64_t maximum_input_width =
+        TERMINAL_WINDOW_WIDTH -
+        90 -
+        prompt_width;
+
+    if (existing_width +
+            desktop->font.glyph_width >
+        maximum_input_width) {
+        return false;
+    }
+
+    desktop->terminal_input[
+        desktop->terminal_input_length
+    ] = (char)character;
+
+    desktop->terminal_input_length++;
+
+    desktop->terminal_input[
+        desktop->terminal_input_length
+    ] = '\0';
 
     return true;
 }

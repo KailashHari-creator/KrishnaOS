@@ -6,6 +6,9 @@
 #include <stdint.h>
 
 #include <krishna/graphics.h>
+#include <krishna/abi.h>
+
+#define DESKTOP_TERMINAL_INPUT_CAPACITY 256
 
 enum desktop_frontend_action {
     DESKTOP_FRONTEND_ACTION_NONE,
@@ -35,6 +38,12 @@ struct desktop_frontend {
 
     bool terminal_hovered;
     bool terminal_open;
+
+    char terminal_input[
+        DESKTOP_TERMINAL_INPUT_CAPACITY
+    ];
+
+    size_t terminal_input_length;
 };
 
 bool desktop_frontend_initialize(
@@ -61,6 +70,11 @@ desktop_frontend_click(
 
 bool desktop_frontend_close_terminal(
     struct desktop_frontend *desktop
+);
+
+bool desktop_frontend_handle_key(
+    struct desktop_frontend *desktop,
+    const struct krishna_keyboard_event *event
 );
 
 #endif
