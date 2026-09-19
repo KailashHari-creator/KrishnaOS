@@ -110,6 +110,24 @@ bool kernel_process_handle_close(
     uint64_t handle
 );
 
+#define KERNEL_PROCESS_FIRST_DYNAMIC_HANDLE \
+    ((uint64_t)6)
+
+bool kernel_process_handle_allocate(
+    struct kernel_process *process,
+    struct kernel_object *object,
+    uint32_t rights,
+    uint64_t *result_handle
+);
+
+bool kernel_process_handle_duplicate(
+    struct kernel_process *source_process,
+    uint64_t source_handle,
+    struct kernel_process *target_process,
+    uint64_t target_handle,
+    uint32_t rights
+);
+
 /*
  * Verify creation, kernel sharing, userspace isolation, CR3
  * switching and complete cleanup.

@@ -7,6 +7,7 @@
 #include <krishna/syscall.h>
 #include <krishna/device.h>
 #include <krishna/memory.h>
+#include <krishna/ipc.h>
 
 int64_t krishna_write(
     uint64_t handle,
@@ -180,16 +181,59 @@ int64_t krishna_memory_unmap(
 
 int64_t krishna_process_spawn(
     const char *path,
-    size_t path_length
+    size_t path_length,
+    uint64_t inherited_handle,
+    uint64_t child_handle
 )
 {
     return krishna_syscall6(
         KRISHNA_SYSCALL_PROCESS_SPAWN,
         (uint64_t)(uintptr_t)path,
-        (uint64_t)path_length,
-        0,
-        0,
+        path_length,
+        inherited_handle,
+        child_handle,
         0,
         0
+    );
+}
+
+int64_t krishna_channel_create(
+    struct krishna_channel_pair *pair
+)
+{
+    return krishna_syscall6(
+        KRISHNA_SYSCALL_CHANNEL_CREATE,
+        (uint64_t)(uintptr_t)pair,
+        0, 0, 0, 0, 0
+    );
+}
+
+int64_t krishna_channel_send(
+    uint64_t handle,
+    const void *message,
+    size_t size
+)
+{
+    return krishna_syscall6(
+        KRISHNA_SYSCALL_CHANNEL_SEND,
+        handle,
+        (uint64_t)(uintptr_t)message,
+        size,
+        0, 0, 0
+    );
+}
+
+int64_t krishna_channel_receive(
+    uint64_t handle,
+    void *message,
+    size_t capacity
+)
+{
+    return krishna_syscall6(
+        KRISHNA_SYSCALL_CHANNEL_RECEIVE,
+        handle,
+        (uint64_t)(uintptr_t)message,
+        capacity,
+        0, 0, 0
     );
 }

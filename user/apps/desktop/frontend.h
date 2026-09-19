@@ -77,4 +77,10 @@ bool desktop_frontend_handle_key(
     const struct krishna_keyboard_event *event
 );
 
+bool desktop_frontend_set_terminal_input(
+    struct desktop_frontend *desktop,
+    const char *text,
+    size_t length
+);
+
 #endif

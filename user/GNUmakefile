@@ -68,12 +68,13 @@ DESKTOP_ASFILES := \
 TERMINAL_CFILES := \
 	apps/terminal/main.c
 
-TERMINAL_OBJECTS := \
-	$(patsubst %.c,obj/%.c.o,$(TERMINAL_CFILES))
-
 COMMON_OBJECTS := \
 	$(addprefix obj/,$(COMMON_CFILES:.c=.c.o)) \
 	$(addprefix obj/,$(COMMON_ASFILES:.S=.S.o))
+
+TERMINAL_OBJECTS := \
+	$(COMMON_OBJECTS) \
+	$(addprefix obj/,$(TERMINAL_CFILES:.c=.c.o))
 
 TEST_OBJECTS := \
 	$(COMMON_OBJECTS) \
@@ -116,7 +117,8 @@ bin/desktop.elf: \
 bin/terminal.elf: \
 	$(TERMINAL_OBJECTS) \
 	linker.ld \
-	@mkdir -p "$(dir $@)"
+	GNUmakefile
+	mkdir -p "$(dir $@)"
 	$(LD) $(LDFLAGS) $(TERMINAL_OBJECTS) -o $@
 
 obj/%.c.o: %.c GNUmakefile

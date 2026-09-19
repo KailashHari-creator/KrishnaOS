@@ -13,6 +13,7 @@
 #include "object/object.h"
 #include "object/serial_console.h"
 #include "object/input.h"
+#include "object/channel.h"
 
 extern void arch_syscall_interrupt_entry(void);
 
@@ -483,19 +484,18 @@ static int64_t syscall_handle_sleep(
 static int64_t syscall_handle_process_spawn(
     uint64_t user_path,
     uint64_t path_length,
-    uint64_t ignored_3,
-    uint64_t ignored_4,
+    uint64_t inherited_handle,
+    uint64_t child_handle,
     uint64_t ignored_5,
     uint64_t ignored_6
 )
 {
-    (void)ignored_3;
-    (void)ignored_4;
     (void)ignored_5;
     (void)ignored_6;
 
     if (path_length == 0 ||
-        path_length >= SYSCALL_MAX_PATH_SIZE) {
+        path_length >= SYSCALL_MAX_PATH_SIZE ||
+        child_handle >= KERNEL_PROCESS_MAX_HANDLES) {
         return -KRISHNA_ERROR_INVALID_ARGUMENT;
     }
 
@@ -513,8 +513,233 @@ static int64_t syscall_handle_process_spawn(
 
     return user_application_spawn(
         path,
-        (size_t)path_length
+        (size_t)path_length,
+        kernel_thread_current_process(),
+        inherited_handle,
+        child_handle
     );
+}
+
+static int64_t syscall_handle_channel_create(
+    uint64_t user_result,
+    uint64_t ignored_2,
+    uint64_t ignored_3,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_2;
+    (void)ignored_3;
+    (void)ignored_4;
+    (void)ignored_5;
+    (void)ignored_6;
+
+    if (!user_buffer_validate(
+            (void *)(uintptr_t)user_result,
+            sizeof(struct krishna_channel_pair),
+            true
+        )) {
+        return -KRISHNA_ERROR_ACCESS_FAULT;
+    }
+
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    if (process == NULL) {
+        return -KRISHNA_ERROR_NO_SUCH_PROCESS;
+    }
+
+    struct kernel_object *first_object;
+    struct kernel_object *second_object;
+
+    if (!kernel_channel_create_pair(
+            &first_object,
+            &second_object
+        )) {
+        return -KRISHNA_ERROR_OUT_OF_MEMORY;
+    }
+
+    struct krishna_channel_pair pair = {
+        .first = KRISHNA_HANDLE_INVALID,
+        .second = KRISHNA_HANDLE_INVALID
+    };
+
+    uint32_t rights =
+        KERNEL_HANDLE_RIGHT_READ |
+        KERNEL_HANDLE_RIGHT_WRITE;
+
+    if (!kernel_process_handle_allocate(
+            process,
+            first_object,
+            rights,
+            &pair.first
+        )) {
+        kernel_object_release(first_object);
+        kernel_object_release(second_object);
+        return -KRISHNA_ERROR_OUT_OF_MEMORY;
+    }
+
+    if (!kernel_process_handle_allocate(
+            process,
+            second_object,
+            rights,
+            &pair.second
+        )) {
+        (void)kernel_process_handle_close(
+            process,
+            pair.first
+        );
+
+        kernel_object_release(first_object);
+        kernel_object_release(second_object);
+        return -KRISHNA_ERROR_OUT_OF_MEMORY;
+    }
+
+    /*
+     * The process handle table now owns the endpoint references.
+     */
+    kernel_object_release(first_object);
+    kernel_object_release(second_object);
+
+    if (!copy_to_user(
+            (void *)(uintptr_t)user_result,
+            &pair,
+            sizeof(pair)
+        )) {
+        (void)kernel_process_handle_close(
+            process,
+            pair.first
+        );
+
+        (void)kernel_process_handle_close(
+            process,
+            pair.second
+        );
+
+        return -KRISHNA_ERROR_ACCESS_FAULT;
+    }
+
+    return 0;
+}
+
+static int64_t syscall_handle_channel_send(
+    uint64_t handle,
+    uint64_t user_buffer,
+    uint64_t size,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_4;
+    (void)ignored_5;
+    (void)ignored_6;
+
+    if (size == 0 ||
+        size > KRISHNA_CHANNEL_MAX_MESSAGE_SIZE) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    uint8_t buffer[KRISHNA_CHANNEL_MAX_MESSAGE_SIZE];
+
+    if (!copy_from_user(
+            buffer,
+            (const void *)(uintptr_t)user_buffer,
+            (size_t)size
+        )) {
+        return -KRISHNA_ERROR_ACCESS_FAULT;
+    }
+
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    struct kernel_object *object =
+        kernel_process_handle_acquire(
+            process,
+            handle,
+            KERNEL_HANDLE_RIGHT_WRITE
+        );
+
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    int64_t result =
+        kernel_object_write(
+            object,
+            buffer,
+            (size_t)size
+        );
+
+    kernel_object_release(object);
+    return result;
+}
+
+static int64_t syscall_handle_channel_receive(
+    uint64_t handle,
+    uint64_t user_buffer,
+    uint64_t capacity,
+    uint64_t ignored_4,
+    uint64_t ignored_5,
+    uint64_t ignored_6
+)
+{
+    (void)ignored_4;
+    (void)ignored_5;
+    (void)ignored_6;
+
+    if (capacity == 0 ||
+        capacity > KRISHNA_CHANNEL_MAX_MESSAGE_SIZE) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (!user_buffer_validate(
+            (void *)(uintptr_t)user_buffer,
+            (size_t)capacity,
+            true
+        )) {
+        return -KRISHNA_ERROR_ACCESS_FAULT;
+    }
+
+    struct kernel_process *process =
+        kernel_thread_current_process();
+
+    struct kernel_object *object =
+        kernel_process_handle_acquire(
+            process,
+            handle,
+            KERNEL_HANDLE_RIGHT_READ
+        );
+
+    if (object == NULL) {
+        return -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+    }
+
+    uint8_t buffer[KRISHNA_CHANNEL_MAX_MESSAGE_SIZE];
+
+    int64_t result =
+        kernel_object_read(
+            object,
+            buffer,
+            (size_t)capacity
+        );
+
+    kernel_object_release(object);
+
+    if (result <= 0) {
+        return result;
+    }
+
+    if (!copy_to_user(
+            (void *)(uintptr_t)user_buffer,
+            buffer,
+            (size_t)result
+        )) {
+        return -KRISHNA_ERROR_ACCESS_FAULT;
+    }
+
+    return result;
 }
 
 /*
@@ -554,7 +779,16 @@ static const syscall_handler_t syscall_table[
         syscall_handle_close,
         
     [KRISHNA_SYSCALL_PROCESS_SPAWN] =
-        syscall_handle_process_spawn
+        syscall_handle_process_spawn,
+
+    [KRISHNA_SYSCALL_CHANNEL_CREATE] =
+        syscall_handle_channel_create,
+
+    [KRISHNA_SYSCALL_CHANNEL_SEND] =
+        syscall_handle_channel_send,
+
+    [KRISHNA_SYSCALL_CHANNEL_RECEIVE] =
+        syscall_handle_channel_receive
 };
 
 static uint64_t syscall_interrupt_save_disable(void)

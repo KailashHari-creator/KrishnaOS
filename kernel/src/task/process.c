@@ -217,6 +217,103 @@ bool kernel_process_handle_install(
     return installed;
 }
 
+bool kernel_process_handle_allocate(
+    struct kernel_process *process,
+    struct kernel_object *object,
+    uint32_t rights,
+    uint64_t *result_handle
+)
+{
+    if (!process_system_initialized ||
+        process == NULL ||
+        object == NULL ||
+        result_handle == NULL ||
+        rights == 0) {
+        return false;
+    }
+
+    if (!kernel_object_retain(object)) {
+        return false;
+    }
+
+    interrupt_state_t interrupt_state =
+        spinlock_lock_irqsave(&process_lock);
+
+    bool installed = false;
+    uint64_t selected_handle = UINT64_MAX;
+
+    if (process_registered_locked(process) &&
+        process->state == KERNEL_PROCESS_ALIVE) {
+        for (uint64_t handle =
+                 KERNEL_PROCESS_FIRST_DYNAMIC_HANDLE;
+             handle < KERNEL_PROCESS_MAX_HANDLES;
+             handle++) {
+            if (process->handles[handle].object == NULL) {
+                process->handles[handle].object = object;
+                process->handles[handle].rights = rights;
+
+                selected_handle = handle;
+                installed = true;
+                break;
+            }
+        }
+    }
+
+    spinlock_unlock_irqrestore(
+        &process_lock,
+        interrupt_state
+    );
+
+    if (!installed) {
+        kernel_object_release(object);
+        return false;
+    }
+
+    *result_handle = selected_handle;
+    return true;
+}
+
+bool kernel_process_handle_duplicate(
+    struct kernel_process *source_process,
+    uint64_t source_handle,
+    struct kernel_process *target_process,
+    uint64_t target_handle,
+    uint32_t rights
+)
+{
+    if (source_process == NULL ||
+        target_process == NULL ||
+        rights == 0) {
+        return false;
+    }
+
+    /*
+     * acquire() also verifies that the source handle owns every
+     * requested right, preventing rights escalation.
+     */
+    struct kernel_object *object =
+        kernel_process_handle_acquire(
+            source_process,
+            source_handle,
+            rights
+        );
+
+    if (object == NULL) {
+        return false;
+    }
+
+    bool installed =
+        kernel_process_handle_install(
+            target_process,
+            target_handle,
+            object,
+            rights
+        );
+
+    kernel_object_release(object);
+    return installed;
+}
+
 struct kernel_object *kernel_process_handle_acquire(
     struct kernel_process *process,
     uint64_t handle,

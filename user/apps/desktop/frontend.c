@@ -1419,3 +1419,31 @@ bool desktop_frontend_handle_key(
 
     return true;
 }
+bool desktop_frontend_set_terminal_input(
+    struct desktop_frontend *desktop,
+    const char *text,
+    size_t length
+)
+{
+    if (desktop == NULL || text == NULL) {
+        return false;
+    }
+
+    if (length >=
+        DESKTOP_TERMINAL_INPUT_CAPACITY) {
+        length =
+            DESKTOP_TERMINAL_INPUT_CAPACITY - 1;
+    }
+
+    for (size_t index = 0;
+         index < length;
+         index++) {
+        desktop->terminal_input[index] =
+            text[index];
+    }
+
+    desktop->terminal_input[length] = '\0';
+    desktop->terminal_input_length = length;
+
+    return true;
+}

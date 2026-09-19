@@ -8,7 +8,10 @@
 #include <krishna/io.h>
 #include <krishna/memory.h>
 #include <krishna/process.h>
+#include <krishna/ipc.h>
+#include <krishna/terminal_protocol.h>
 #include "frontend.h"
+
 
 #define DESKTOP_WIDTH  UINT64_C(1280)
 #define DESKTOP_HEIGHT UINT64_C(800)
@@ -406,6 +409,9 @@ static void write_message(
 int main(void)
 {
     int64_t terminal_process_id = -1;
+
+    uint64_t terminal_channel =
+        KRISHNA_HANDLE_INVALID;
     static const char started_message[] =
         "[DESKTOP] Ring-3 desktop started\n";
 
@@ -642,10 +648,72 @@ int main(void)
                 }
 
                 if (action ==
-                    DESKTOP_FRONTEND_ACTION_OPEN_TERMINAL) {
+                        DESKTOP_FRONTEND_ACTION_OPEN_TERMINAL &&
+                    terminal_process_id < 0) {
+                    struct krishna_channel_pair pair;
+
+                    int64_t channel_result =
+                        krishna_channel_create(&pair);
+
+                    if (channel_result < 0) {
+                        DESKTOP_FAILURE(
+                            "[DESKTOP] channel creation failed\n"
+                        );
+                    }
+
+                    static const char terminal_path[] =
+                        "/system/bin/terminal";
+
+                    terminal_process_id =
+                        krishna_process_spawn(
+                            terminal_path,
+                            sizeof(terminal_path) - 1,
+                            pair.second,
+                            KRISHNA_HANDLE_APPLICATION_CHANNEL
+                        );
+
+                    if (terminal_process_id < 0) {
+                        (void)krishna_close(pair.first);
+                        (void)krishna_close(pair.second);
+
+                        DESKTOP_FAILURE(
+                            "[DESKTOP] terminal spawn failed\n"
+                        );
+                    }
+
+                    terminal_channel = pair.first;
+
+                    /*
+                    * The child now owns its retained copy of this endpoint.
+                    */
+                    (void)krishna_close(pair.second);
+
+                    struct terminal_message ping = {
+                        .type = TERMINAL_MESSAGE_PING,
+                        .length = 0
+                    };
+
+                    int64_t ping_result =
+                        krishna_channel_send(
+                            terminal_channel,
+                            &ping,
+                            offsetof(
+                                struct terminal_message,
+                                payload
+                            )
+                        );
+
+                    if (ping_result < 0) {
+                        DESKTOP_FAILURE(
+                            "[DESKTOP] terminal IPC ping failed\n"
+                        );
+                    }
+
                     write_message(
-                        terminal_message,
-                        sizeof(terminal_message) - 1
+                        "[DESKTOP] terminal process spawned\n",
+                        sizeof(
+                            "[DESKTOP] terminal process spawned\n"
+                        ) - 1
                     );
                 }
             }
@@ -685,16 +753,41 @@ int main(void)
                     desktop_frontend_close_terminal(
                         &desktop
                     );
-            } else {
-                /*
-                * All other keyboard events are offered to the focused
-                * terminal frontend.
-                */
-                frontend_changed =
-                    desktop_frontend_handle_key(
-                        &desktop,
-                        &keyboard_event
+            } else if (
+                desktop.terminal_open &&
+                terminal_channel !=
+                    KRISHNA_HANDLE_INVALID &&
+                keyboard_event.pressed
+            ) {
+                struct terminal_message message = {
+                    .type = TERMINAL_MESSAGE_KEY,
+                    .length =
+                        sizeof(
+                            struct krishna_keyboard_event
+                        )
+                };
+
+                message.payload.key =
+                    keyboard_event;
+
+                int64_t send_result =
+                    krishna_channel_send(
+                        terminal_channel,
+                        &message,
+                        offsetof(
+                            struct terminal_message,
+                            payload.key
+                        ) +
+                        sizeof(message.payload.key)
                     );
+
+                if (send_result < 0 &&
+                    send_result !=
+                        -KRISHNA_ERROR_WOULD_BLOCK) {
+                    DESKTOP_FAILURE(
+                        "[DESKTOP] terminal key send failed\n"
+                    );
+                }
             }
 
             if (frontend_changed) {
@@ -722,6 +815,75 @@ int main(void)
             DESKTOP_FAILURE(
                 "[DESKTOP] keyboard read failed\n"
             );
+        }
+
+        /*
+        * Receive state updates and control replies from the terminal
+        * process.
+        */
+        if (terminal_channel !=
+            KRISHNA_HANDLE_INVALID) {
+            struct terminal_message message;
+
+            int64_t receive_result =
+                krishna_channel_receive(
+                    terminal_channel,
+                    &message,
+                    sizeof(message)
+                );
+
+            if (receive_result > 0) {
+                handled_event = true;
+
+                if (message.type ==
+                    TERMINAL_MESSAGE_PONG) {
+                    write_message(
+                        "[OK] terminal process and IPC channel verified\n",
+                        sizeof(
+                            "[OK] terminal process and IPC channel verified\n"
+                        ) - 1
+                    );
+                } else if (
+                    message.type ==
+                        TERMINAL_MESSAGE_STATE &&
+                    message.length <
+                        TERMINAL_PROTOCOL_TEXT_CAPACITY
+                ) {
+                    bool input_changed =
+                        desktop_frontend_set_terminal_input(
+                            &desktop,
+                            message.payload.text,
+                            message.length
+                        );
+
+                    if (input_changed &&
+                        desktop.terminal_open) {
+                        cursor_hide(&cursor);
+
+                        desktop_frontend_render(
+                            &desktop
+                        );
+
+                        if (!graphics_present(
+                                &graphics,
+                                &desktop_graphics
+                            )) {
+                            DESKTOP_FAILURE(
+                                "[DESKTOP] terminal state presentation failed\n"
+                            );
+                        }
+
+                        cursor_show(&cursor);
+                    }
+                }
+            } else if (
+                receive_result !=
+                    -KRISHNA_ERROR_WOULD_BLOCK
+            ) {
+                DESKTOP_FAILURE(
+                    "[DESKTOP] terminal IPC receive failed\n"
+                );
+            }
         }
 
         /*

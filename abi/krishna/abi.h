@@ -59,6 +59,7 @@
 #define KRISHNA_ERROR_NO_SUCH_PROCESS      3
 #define KRISHNA_ERROR_INTERRUPTED          4
 #define KRISHNA_ERROR_IO                   5
+#define KRISHNA_ERROR_EXEC_FORMAT          8
 #define KRISHNA_ERROR_BAD_FILE_DESCRIPTOR  9
 #define KRISHNA_ERROR_WOULD_BLOCK         11
 #define KRISHNA_ERROR_OUT_OF_MEMORY       12
@@ -125,6 +126,18 @@ struct krishna_framebuffer_info {
     uint8_t blue_mask_size;
 
     uint8_t reserved[6];
+};
+
+#define KRISHNA_HANDLE_INVALID UINT64_MAX
+#define KRISHNA_HANDLE_APPLICATION_CHANNEL \
+    UINT64_C(6)
+
+#define KRISHNA_CHANNEL_MAX_MESSAGE_SIZE \
+    ((size_t)128)
+
+struct krishna_channel_pair {
+    uint64_t first;
+    uint64_t second;
 };
 
 #endif

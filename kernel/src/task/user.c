@@ -43,6 +43,8 @@ extern const uint8_t embedded_user_test_elf_start[];
 extern const uint8_t embedded_user_test_elf_end[];
 extern const uint8_t embedded_desktop_elf_start[];
 extern const uint8_t embedded_desktop_elf_end[];
+extern const uint8_t embedded_terminal_elf_start[];
+extern const uint8_t embedded_terminal_elf_end[];
 #define USER_APPLICATION_STACK_PAGES ((size_t)16)
 #define USER_APPLICATION_KERNEL_STACK_PAGES ((size_t)4)
 #define USER_APPLICATION_RUNTIME_LIMIT ((size_t)16)
@@ -57,7 +59,7 @@ struct user_application_image {
 struct user_application_runtime {
     bool occupied;
     struct kernel_process *process;
-    struct elf_loaded_image image;
+    struct elf64_loaded_image image;
     uintptr_t stack_physical;
     size_t stack_pages;
 };
@@ -461,10 +463,24 @@ cleanup:
 }
 int64_t user_application_spawn(
     const char *path,
-    size_t path_length
+    size_t path_length,
+    struct kernel_process *parent_process,
+    uint64_t inherited_handle,
+    uint64_t child_handle
 )
 {
-    if (path == NULL || path_length == 0) {
+    if (path == NULL ||
+        path_length == 0) {
+        return -KRISHNA_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (inherited_handle !=
+            KRISHNA_HANDLE_INVALID &&
+        (
+            parent_process == NULL ||
+            child_handle >=
+                KERNEL_PROCESS_MAX_HANDLES
+        )) {
         return -KRISHNA_ERROR_INVALID_ARGUMENT;
     }
 
@@ -479,12 +495,17 @@ int64_t user_application_spawn(
     }
 
     size_t elf_size =
-        (size_t)(application.end -
-                 application.start);
+        (size_t)(
+            (uintptr_t)application.end -
+            (uintptr_t)application.start
+        );
 
     if (elf_size == 0 ||
-        !elf_validate(application.start, elf_size)) {
-        return -KRISHNA_ERROR_INVALID_EXECUTABLE;
+        !elf64_validate(
+            application.start,
+            elf_size
+        )) {
+        return -KRISHNA_ERROR_EXEC_FORMAT;
     }
 
     struct user_application_runtime *runtime =
@@ -494,164 +515,256 @@ int64_t user_application_spawn(
         return -KRISHNA_ERROR_OUT_OF_MEMORY;
     }
 
-    runtime->process = NULL;
-    runtime->stack_physical = 0;
-    runtime->stack_pages =
-        USER_APPLICATION_STACK_PAGES;
+    /*
+     * From this point onward every failure must release the runtime
+     * slot and every successfully allocated resource.
+     */
+    struct kernel_process *process = NULL;
 
-    struct kernel_process *process =
-        kernel_process_create();
+    struct vmm_address_space *space = NULL;
+
+    struct elf64_loaded_image image = {
+        .entry = 0,
+        .pages = NULL,
+        .page_count = 0
+    };
+
+    uint64_t stack_physical =
+        PMM_INVALID_ADDRESS;
+
+    uint64_t stack_base =
+        USER_SPACE_TOP -
+        (uint64_t)
+            USER_APPLICATION_STACK_PAGES *
+            VMM_PAGE_SIZE;
+
+    bool image_loaded = false;
+    bool stack_mapped = false;
+
+    int64_t failure_result =
+        -KRISHNA_ERROR_OUT_OF_MEMORY;
+
+    process = kernel_process_create();
 
     if (process == NULL) {
-        runtime->occupied = false;
-        return -KRISHNA_ERROR_OUT_OF_MEMORY;
+        goto failure;
     }
 
-    runtime->process = process;
+    space =
+        kernel_process_address_space(
+            process
+        );
+
+    if (space == NULL) {
+        goto failure;
+    }
 
     /*
-     * Ordinary applications receive the standard serial handles.
-     * They do not automatically receive the framebuffer, keyboard,
-     * or mouse.
+     * Every normal application receives stdout and stderr.
      */
-    if (!serial_console_attach_process(process)) {
-        kernel_process_destroy(process);
-        runtime->process = NULL;
-        runtime->occupied = false;
-        return -KRISHNA_ERROR_IO;
+    if (!serial_console_attach_standard_handles(
+            process
+        )) {
+        failure_result =
+            -KRISHNA_ERROR_IO;
+
+        goto failure;
     }
 
-    if (!elf_load_process(
+    /*
+     * Optionally copy one parent handle into the child. For the
+     * terminal this is the second endpoint of its IPC channel.
+     */
+    if (inherited_handle !=
+        KRISHNA_HANDLE_INVALID) {
+        if (!kernel_process_handle_duplicate(
+                parent_process,
+                inherited_handle,
+                process,
+                child_handle,
+                KERNEL_HANDLE_RIGHT_READ |
+                    KERNEL_HANDLE_RIGHT_WRITE
+            )) {
+            failure_result =
+                -KRISHNA_ERROR_BAD_FILE_DESCRIPTOR;
+
+            goto failure;
+        }
+    }
+
+    if (!elf64_load(
+            process,
             application.start,
             elf_size,
-            process,
-            &runtime->image
+            &image
         )) {
-        kernel_process_destroy(process);
-        runtime->process = NULL;
-        runtime->occupied = false;
-        return -KRISHNA_ERROR_INVALID_EXECUTABLE;
+        failure_result =
+            -KRISHNA_ERROR_EXEC_FORMAT;
+
+        goto failure;
     }
 
-    uintptr_t stack_physical =
+    image_loaded = true;
+
+    stack_physical =
         pmm_allocate_pages(
             USER_APPLICATION_STACK_PAGES
         );
 
-    if (stack_physical == 0) {
-        elf_unload_process(
-            process,
-            &runtime->image
-        );
-
-        kernel_process_destroy(process);
-        runtime->process = NULL;
-        runtime->occupied = false;
-        return -KRISHNA_ERROR_OUT_OF_MEMORY;
+    if (stack_physical ==
+        PMM_INVALID_ADDRESS) {
+        goto failure;
     }
 
-    runtime->stack_physical = stack_physical;
+    /*
+     * Zero every physical stack page through the HHDM.
+     */
+    for (size_t page = 0;
+         page <
+            USER_APPLICATION_STACK_PAGES;
+         page++) {
+        void *page_memory =
+            pmm_physical_to_virtual(
+                stack_physical +
+                (uint64_t)page *
+                    VMM_PAGE_SIZE
+            );
 
-    void *stack_memory =
-        pmm_physical_to_virtual(stack_physical);
+        if (page_memory == NULL) {
+            goto failure;
+        }
 
-    if (stack_memory == NULL) {
-        pmm_free_pages(
-            stack_physical,
-            USER_APPLICATION_STACK_PAGES
-        );
-
-        elf_unload_process(
-            process,
-            &runtime->image
-        );
-
-        kernel_process_destroy(process);
-        runtime->process = NULL;
-        runtime->stack_physical = 0;
-        runtime->occupied = false;
-        return -KRISHNA_ERROR_OUT_OF_MEMORY;
+        zero_page(page_memory);
     }
 
-    memset(
-        stack_memory,
-        0,
-        USER_APPLICATION_STACK_PAGES *
-            PAGE_SIZE
-    );
+    uint64_t stack_flags =
+        VMM_PAGE_USER |
+        VMM_PAGE_WRITABLE;
 
-    uintptr_t stack_virtual =
-        USER_SPACE_TOP -
-        USER_APPLICATION_STACK_PAGES *
-            PAGE_SIZE;
+    if (vmm_nx_supported()) {
+        stack_flags |=
+            VMM_PAGE_NO_EXECUTE;
+    }
 
-    if (!kernel_process_map_pages(
-            process,
-            stack_virtual,
+    if (!vmm_map_pages(
+            space,
+            stack_base,
             stack_physical,
             USER_APPLICATION_STACK_PAGES,
-            VMM_FLAG_PRESENT |
-                VMM_FLAG_WRITABLE |
-                VMM_FLAG_USER |
-                VMM_FLAG_NO_EXECUTE
+            stack_flags
         )) {
-        pmm_free_pages(
-            stack_physical,
-            USER_APPLICATION_STACK_PAGES
-        );
-
-        elf_unload_process(
-            process,
-            &runtime->image
-        );
-
-        kernel_process_destroy(process);
-        runtime->process = NULL;
-        runtime->stack_physical = 0;
-        runtime->occupied = false;
-        return -KRISHNA_ERROR_OUT_OF_MEMORY;
+        goto failure;
     }
+
+    stack_mapped = true;
+
+    uint64_t process_id =
+        kernel_process_id(process);
+
+    if (process_id == UINT64_MAX ||
+        process_id > INT64_MAX) {
+        failure_result =
+            -KRISHNA_ERROR_NO_SUCH_PROCESS;
+
+        goto failure;
+    }
+
+    /*
+     * Save ownership information before the new thread becomes
+     * runnable.
+     */
+    runtime->process = process;
+    runtime->image = image;
+    runtime->stack_physical =
+        stack_physical;
+    runtime->stack_pages =
+        USER_APPLICATION_STACK_PAGES;
 
     struct kernel_thread *thread =
         kernel_thread_create_user(
             process,
-            runtime->image.entry,
+            image.entry,
             USER_SPACE_TOP,
             USER_APPLICATION_KERNEL_STACK_PAGES
         );
 
     if (thread == NULL) {
-        kernel_process_unmap_pages(
-            process,
-            stack_virtual,
-            USER_APPLICATION_STACK_PAGES
-        );
-
-        pmm_free_pages(
-            stack_physical,
-            USER_APPLICATION_STACK_PAGES
-        );
-
-        elf_unload_process(
-            process,
-            &runtime->image
-        );
-
-        kernel_process_destroy(process);
+        /*
+         * The runtime record must not retain resources that the
+         * failure path is about to release.
+         */
         runtime->process = NULL;
-        runtime->stack_physical = 0;
-        runtime->occupied = false;
-        return -KRISHNA_ERROR_OUT_OF_MEMORY;
-    }
+        runtime->image =
+            (struct elf64_loaded_image){
+                .entry = 0,
+                .pages = NULL,
+                .page_count = 0
+            };
 
-    uint64_t process_id =
-        kernel_process_id(process);
+        runtime->stack_physical =
+            PMM_INVALID_ADDRESS;
 
-    if (process_id > INT64_MAX) {
-        return -KRISHNA_ERROR_NO_SUCH_PROCESS;
+        runtime->stack_pages = 0;
+
+        goto failure;
     }
 
     return (int64_t)process_id;
+
+failure:
+    if (stack_mapped && space != NULL) {
+        for (size_t page = 0;
+             page <
+                USER_APPLICATION_STACK_PAGES;
+             page++) {
+            (void)vmm_unmap_page(
+                space,
+                stack_base +
+                    (uint64_t)page *
+                        VMM_PAGE_SIZE,
+                NULL
+            );
+        }
+    }
+
+    if (stack_physical !=
+        PMM_INVALID_ADDRESS) {
+        (void)pmm_free_pages(
+            stack_physical,
+            USER_APPLICATION_STACK_PAGES
+        );
+    }
+
+    if (image_loaded &&
+        process != NULL) {
+        (void)elf64_unload(
+            process,
+            &image
+        );
+    }
+
+    if (process != NULL) {
+        (void)kernel_process_destroy(
+            process
+        );
+    }
+
+    runtime->occupied = false;
+    runtime->process = NULL;
+
+    runtime->image =
+        (struct elf64_loaded_image){
+            .entry = 0,
+            .pages = NULL,
+            .page_count = 0
+        };
+
+    runtime->stack_physical =
+        PMM_INVALID_ADDRESS;
+
+    runtime->stack_pages = 0;
+
+    return failure_result;
 }
 bool user_desktop_start(void)
 {

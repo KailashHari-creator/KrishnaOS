@@ -159,13 +159,14 @@ obj/%.asm.o: %.asm GNUmakefile
 	mkdir -p "$(dir $@)"
 	nasm $(NASMFLAGS) -MD $(@:.o=.d) -MP $< -o $@
 # Build the userspace ELF if the kernel is compiled directly.
-../user/bin/user_test.elf ../user/bin/desktop.elf:
+../user/bin/user_test.elf ../user/bin/desktop.elf ../user/bin/terminal.elf:
 	$(MAKE) -C ../user
 
 # Re-embed the ELF whenever the userspace executable changes.
 obj/src/task/user_image.asm.o: \
 	../user/bin/user_test.elf \
-	../user/bin/desktop.elf
+	../user/bin/desktop.elf \
+	../user/bin/terminal.elf
 
 # Remove object files and the final executable.
 .PHONY: clean
