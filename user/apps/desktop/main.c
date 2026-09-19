@@ -8,6 +8,7 @@
 #include <krishna/io.h>
 #include <krishna/memory.h>
 #include <krishna/process.h>
+#include "frontend.h"
 
 #define DESKTOP_WIDTH  UINT64_C(1280)
 #define DESKTOP_HEIGHT UINT64_C(800)
@@ -21,14 +22,17 @@ extern const uint8_t krishna_wallpaper_end[];
 extern const uint8_t krishna_cursor_start[];
 extern const uint8_t krishna_cursor_end[];
 
-struct desktop {
-    struct graphics_context *graphics;
+#define DESKTOP_BACKBUFFER_WIDTH  UINT64_C(1280)
+#define DESKTOP_BACKBUFFER_HEIGHT UINT64_C(800)
 
-    uint64_t terminal_x;
-    uint64_t terminal_y;
-    uint64_t terminal_width;
-    uint64_t terminal_height;
-};
+#define DESKTOP_BACKBUFFER_SIZE \
+    (DESKTOP_BACKBUFFER_WIDTH * \
+     DESKTOP_BACKBUFFER_HEIGHT * \
+     sizeof(uint32_t))
+
+static uint8_t desktop_backbuffer[
+    DESKTOP_BACKBUFFER_SIZE
+] __attribute__((aligned(16)));
 
 struct desktop_cursor {
     struct graphics_context *graphics;
@@ -67,228 +71,6 @@ static _Noreturn void desktop_failure(
 
 #define DESKTOP_FAILURE(message) \
     desktop_failure((message), sizeof(message) - 1)
-
-static void desktop_glass_panel(
-    struct graphics_context *graphics,
-    uint64_t x,
-    uint64_t y,
-    uint64_t width,
-    uint64_t height,
-    uint64_t radius
-)
-{
-    graphics_rounded_rectangle(
-        graphics,
-        x,
-        y,
-        width,
-        height,
-        radius,
-        72,
-        220,
-        245,
-        180
-    );
-
-    if (width > 2 && height > 2) {
-        graphics_rounded_rectangle(
-            graphics,
-            x + 1,
-            y + 1,
-            width - 2,
-            height - 2,
-            radius > 0
-                ? radius - 1
-                : 0,
-            5,
-            30,
-            58,
-            205
-        );
-    }
-}
-
-static void desktop_draw_terminal_icon(
-    struct desktop *desktop
-)
-{
-    struct graphics_context *graphics =
-        desktop->graphics;
-
-    uint64_t x = desktop->terminal_x;
-    uint64_t y = desktop->terminal_y;
-
-    graphics_rounded_rectangle(
-        graphics,
-        x - 2,
-        y - 2,
-        desktop->terminal_width + 4,
-        desktop->terminal_height + 4,
-        14,
-        250,
-        199,
-        55,
-        255
-    );
-
-    graphics_rounded_rectangle(
-        graphics,
-        x,
-        y,
-        desktop->terminal_width,
-        desktop->terminal_height,
-        12,
-        5,
-        24,
-        45,
-        245
-    );
-
-    uint32_t symbol_colour =
-        graphics_rgb(
-            graphics,
-            220,
-            250,
-            255
-        );
-
-    for (uint64_t index = 0;
-         index <= 10;
-         index++) {
-        graphics_rectangle(
-            graphics,
-            x + 17 + index,
-            y + 16 + index,
-            3,
-            3,
-            symbol_colour
-        );
-
-        graphics_rectangle(
-            graphics,
-            x + 27 - index,
-            y + 26 + index,
-            3,
-            3,
-            symbol_colour
-        );
-    }
-
-    graphics_rectangle(
-        graphics,
-        x + 35,
-        y + 36,
-        14,
-        3,
-        symbol_colour
-    );
-
-    graphics_rounded_rectangle(
-        graphics,
-        x + 12,
-        y + desktop->terminal_height + 5,
-        40,
-        4,
-        2,
-        250,
-        199,
-        55,
-        255
-    );
-}
-
-static bool desktop_initialize(
-    struct desktop *desktop,
-    struct graphics_context *graphics
-)
-{
-    if (desktop == NULL ||
-        graphics == NULL ||
-        graphics->info.width !=
-            DESKTOP_WIDTH ||
-        graphics->info.height !=
-            DESKTOP_HEIGHT) {
-        return false;
-    }
-
-    desktop->graphics = graphics;
-
-    desktop->terminal_width = 64;
-    desktop->terminal_height = 64;
-
-    desktop->terminal_x =
-        (
-            DESKTOP_WIDTH -
-            desktop->terminal_width
-        ) / 2;
-
-    desktop->terminal_y =
-        DESKTOP_HEIGHT -
-        92 -
-        26 +
-        14;
-
-    return true;
-}
-
-static void desktop_render(
-    struct desktop *desktop
-)
-{
-    struct graphics_context *graphics =
-        desktop->graphics;
-
-    graphics_blit_rgba(
-        graphics,
-        0,
-        0,
-        krishna_wallpaper_start,
-        DESKTOP_WIDTH,
-        DESKTOP_HEIGHT
-    );
-
-    desktop_glass_panel(
-        graphics,
-        0,
-        0,
-        DESKTOP_WIDTH,
-        52,
-        18
-    );
-
-    const uint64_t dock_width = 480;
-    const uint64_t dock_height = 92;
-
-    desktop_glass_panel(
-        graphics,
-        (DESKTOP_WIDTH - dock_width) / 2,
-        DESKTOP_HEIGHT -
-            dock_height -
-            26,
-        dock_width,
-        dock_height,
-        24
-    );
-
-    desktop_draw_terminal_icon(desktop);
-}
-
-static bool desktop_terminal_contains(
-    const struct desktop *desktop,
-    uint64_t x,
-    uint64_t y
-)
-{
-    return
-        x >= desktop->terminal_x &&
-        y >= desktop->terminal_y &&
-        x <
-            desktop->terminal_x +
-            desktop->terminal_width &&
-        y <
-            desktop->terminal_y +
-            desktop->terminal_height;
-}
 
 static bool cursor_initialize(
     struct desktop_cursor *cursor,
@@ -520,28 +302,49 @@ int main(void)
         );
     }
 
-    size_t wallpaper_size =
-        (size_t)(
-            krishna_wallpaper_end -
-            krishna_wallpaper_start
-        );
-
-    if (wallpaper_size !=
-        DESKTOP_WIDTH * DESKTOP_HEIGHT * 4) {
+        if (framebuffer_info.byte_size !=
+        sizeof(desktop_backbuffer) ||
+        framebuffer_info.pitch !=
+            DESKTOP_BACKBUFFER_WIDTH *
+            sizeof(uint32_t)) {
         DESKTOP_FAILURE(
-            "[DESKTOP] wallpaper size mismatch\n"
+            "[DESKTOP] unsupported backbuffer geometry\n"
         );
     }
 
-    struct desktop desktop;
+    struct graphics_context desktop_graphics;
 
-    if (!desktop_initialize(&desktop, &graphics)) {
+    if (!graphics_init(
+            &desktop_graphics,
+            desktop_backbuffer,
+            &framebuffer_info
+        )) {
         DESKTOP_FAILURE(
-            "[DESKTOP] desktop initialization failed\n"
+            "[DESKTOP] backbuffer initialization failed\n"
         );
     }
 
-    desktop_render(&desktop);
+    struct desktop_frontend desktop;
+
+    if (!desktop_frontend_initialize(
+            &desktop,
+            &desktop_graphics
+        )) {
+        DESKTOP_FAILURE(
+            "[DESKTOP] frontend initialization failed\n"
+        );
+    }
+
+    desktop_frontend_render(&desktop);
+
+    if (!graphics_present(
+        &graphics,
+        &desktop_graphics
+    )) {
+        DESKTOP_FAILURE(
+            "[DESKTOP] initial frame presentation failed\n"
+        );
+    }
 
     struct desktop_cursor cursor;
 
@@ -583,6 +386,30 @@ int main(void)
                 mouse_event.delta_y
             );
 
+            bool frontend_changed =
+                desktop_frontend_update_pointer(
+                    &desktop,
+                    cursor.x + 2,
+                    cursor.y + 2
+                );
+
+            if (frontend_changed) {
+                cursor_hide(&cursor);
+
+                desktop_frontend_render(&desktop);
+
+                if (!graphics_present(
+                        &graphics,
+                        &desktop_graphics
+                    )) {
+                    DESKTOP_FAILURE(
+                        "[DESKTOP] frame presentation failed\n"
+                    );
+                }
+
+                cursor_show(&cursor);
+            }
+
             bool left_button =
                 (
                     mouse_event.buttons &
@@ -596,16 +423,39 @@ int main(void)
             previous_left_button =
                 left_button;
 
-            if (left_clicked &&
-                desktop_terminal_contains(
-                    &desktop,
-                    cursor.x + 2,
-                    cursor.y + 2
-                )) {
-                write_message(
-                    terminal_message,
-                    sizeof(terminal_message) - 1
-                );
+            if (left_clicked) {
+                enum desktop_frontend_action action =
+                    desktop_frontend_click(
+                        &desktop,
+                        cursor.x + 2,
+                        cursor.y + 2
+                    );
+
+                if (action !=
+                    DESKTOP_FRONTEND_ACTION_NONE) {
+                    cursor_hide(&cursor);
+
+                    desktop_frontend_render(&desktop);
+
+                    if (!graphics_present(
+                            &graphics,
+                            &desktop_graphics
+                        )) {
+                        DESKTOP_FAILURE(
+                            "[DESKTOP] frame presentation failed\n"
+                        );
+                    }
+
+                    cursor_show(&cursor);
+                }
+
+                if (action ==
+                    DESKTOP_FRONTEND_ACTION_OPEN_TERMINAL) {
+                    write_message(
+                        terminal_message,
+                        sizeof(terminal_message) - 1
+                    );
+                }
             }
         } else if (
             mouse_result !=
@@ -631,6 +481,27 @@ int main(void)
                 keyboard_event
             )) {
             handled_event = true;
+            if (keyboard_event.pressed &&
+                keyboard_event.scancode == 0x01 &&
+                desktop_frontend_close_terminal(
+                    &desktop
+                )) {
+                    cursor_hide(&cursor);
+
+                    desktop_frontend_render(&desktop);
+
+                    if (!graphics_present(
+                            &graphics,
+                            &desktop_graphics
+                        )) {
+                        DESKTOP_FAILURE(
+                            "[DESKTOP] frame presentation failed\n"
+                        );
+                    }
+
+                    cursor_show(&cursor);
+            }
+
         } else if (
             keyboard_result !=
                 -KRISHNA_ERROR_WOULD_BLOCK

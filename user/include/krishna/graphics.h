@@ -78,4 +78,9 @@ void graphics_rounded_rectangle(
     uint8_t alpha
 );
 
+bool graphics_present(
+    struct graphics_context *destination,
+    const struct graphics_context *source
+);
+
 #endif

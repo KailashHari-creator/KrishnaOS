@@ -4,15 +4,8 @@
 #include <limine.h>
 #include "drivers/serial.h"
 #include "drivers/mouse.h"
-#include "drivers/keyboard.h"
 #include "boot/boot_info.h"
-#include "graphics/graphics.h"
-#include "graphics/splash.h"
-#include "graphics/console.h"
-#include "graphics/mouse_cursor.h"
 #include "interrupts.h"
-#include "shell.h"
-#include "ui/desktop.h"
 #include "memory/pmm.h"
 #include "memory/vmm.h"
 #include "memory/vregion.h"
@@ -66,12 +59,6 @@ static volatile struct limine_hhdm_request hhdm_request = {
 };
 
 __attribute__((used, section(".limine_requests")))
-static volatile struct limine_module_request module_request = {
-    .id = LIMINE_MODULE_REQUEST_ID,
-    .revision = 0
-};
-
-__attribute__((used, section(".limine_requests")))
 static volatile struct limine_tsc_frequency_request
 tsc_frequency_request = {
     .id = LIMINE_TSC_FREQUENCY_REQUEST_ID,
@@ -97,41 +84,6 @@ static void kernel_halt(void)
     for (;;) {
         __asm__ volatile ("cli; hlt");
     }
-}
-
-static bool text_equal(const char *left, const char *right)
-{
-    while (*left != '\0' && *right != '\0') {
-        if (*left != *right) {
-            return false;
-        }
-
-        left++;
-        right++;
-    }
-
-    return *left == *right;
-}
-
-static struct limine_file *find_module(const char *name)
-{
-    if (module_request.response == NULL) {
-        return NULL;
-    }
-
-    for (uint64_t i = 0;
-         i < module_request.response->module_count;
-         i++) {
-        struct limine_file *module =
-            module_request.response->modules[i];
-
-        if (module->string != NULL &&
-            text_equal(module->string, name)) {
-            return module;
-        }
-    }
-
-    return NULL;
 }
 
 static uint64_t read_tsc(void)
@@ -226,9 +178,6 @@ void kmain(void)
         kernel_halt();
     }
 
-    struct graphics_context graphics;
-    graphics_init(&graphics, framebuffer);
-
     serial_write("[OK] Framebuffer: ");
     serial_write_u64(framebuffer->width);
     serial_write(" x ");
@@ -236,44 +185,6 @@ void kmain(void)
     serial_write(" x ");
     serial_write_u64(framebuffer->bpp);
     serial_write("\n");
-
-    /*
-     * Ensure Limine supplied our boot modules.
-     */
-    if (module_request.response == NULL ||
-        module_request.response->module_count == 0) {
-        serial_write("[FAIL] No boot modules loaded\n");
-        kernel_halt();
-    }
-
-    /*
-     * Find and display the boot logo.
-     */
-    struct limine_file *logo_module =
-        find_module("krishna-logo");
-
-    if (logo_module == NULL) {
-        serial_write(
-            "[FAIL] KRISHNA OS logo module missing\n"
-        );
-
-        kernel_halt();
-    }
-
-    if (!splash_show(
-            &graphics,
-            (const uint8_t *)logo_module->address,
-            logo_module->size
-        )) {
-        serial_write("[FAIL] Invalid KRISHNA OS logo\n");
-        kernel_halt();
-    }
-
-    splash_set_progress(&graphics, 30);
-
-    serial_write(
-        "[OK] KRISHNA OS splash displayed\n"
-    );
 
     /*
      * Validate and analyse physical memory.
@@ -311,8 +222,6 @@ void kmain(void)
     );
 
     serial_write(" MiB");
-
-    splash_set_progress(&graphics, 65);
 
     serial_write(
         "\nBootloader-reclaimable memory: "
@@ -899,22 +808,6 @@ void kmain(void)
         kernel_halt();
     }
 
-    if (!user_mode_self_test()) {
-        serial_write(
-            "[FAIL] ELF64 Ring-3 execution self-test failed\n"
-        );
-
-        kernel_halt();
-    }
-
-    serial_write(
-        "[OK] ELF64 executable loaded and validated\n"
-    );
-
-    serial_write(
-        "[OK] ELF user process exited with status 42\n"
-    );
-
     struct kheap_statistics heap_statistics;
 
     kheap_get_statistics(
@@ -994,389 +887,28 @@ void kmain(void)
         serial_write("unavailable\n");
     }
 
-    splash_set_progress(
-        &graphics,
-        100
-    );
-
     serial_write(
         "\n[OK] Early boot environment validated\n"
     );
 
+        if (!user_desktop_start()) {
     serial_write(
-        "[OK] Waiting at KRISHNA OS splash\n"
+        "[FAIL] Unable to start Ring-3 desktop process\n"
     );
 
-    serial_write(
-        "Press any key inside QEMU to continue\n"
-    );
-
-    /*
-     * Keep the completed splash visible until a key is pressed.
-     */
-    struct key_event key_event;
-    struct mouse_event discarded_mouse_event;
-
-    for (;;) {
-        if (keyboard_poll(&key_event) &&
-            key_event.pressed) {
-            break;
-        }
-
-        /*
-         * Keyboard and mouse share the PS/2 output buffer. Drain mouse
-         * packets so they cannot prevent keyboard_poll() from reaching
-         * the waiting keyboard byte.
-         */
-        (void)mouse_poll(
-            &discarded_mouse_event
-        );
-
-        __asm__ volatile ("pause");
-    }
-
-        if (user_desktop_start()) {
-        serial_write(
-            "[OK] Ring-3 desktop process started\n"
-        );
-
-        /*
-         * The boot thread now becomes an idle/reaper context.
-         * All desktop rendering and input handling happen in Ring 3.
-         */
-        for (;;) {
-            kernel_thread_yield();
-            kernel_thread_preemption_point();
-        }
-    }
-
-    serial_write(
-        "[WARN] Ring-3 desktop failed; "
-        "falling back to kernel desktop\n"
-    );
-
-    /*
-     * Locate the desktop assets.
-     */
-    struct limine_file *wallpaper_module =
-        find_module("krishna-wallpaper");
-
-    if (wallpaper_module == NULL) {
-        serial_write(
-            "[FAIL] KRISHNA wallpaper missing\n"
-        );
-
-        kernel_halt();
-    }
-
-    struct limine_file *cursor_module =
-        find_module("krishna-cursor");
-
-    if (cursor_module == NULL) {
-        serial_write(
-            "[FAIL] KRISHNA cursor module missing\n"
-        );
-
-        kernel_halt();
-    }
-
-    struct limine_file *font_module =
-        find_module("krishna-font");
-
-    if (font_module == NULL) {
-        serial_write(
-            "[FAIL] KRISHNA OS font module missing\n"
-        );
-
-        kernel_halt();
-    }
-
-    uint64_t cursor_interval =
-        local_apic_timer_frequency() / 2;
-
-    /*
-     * Validate and render the desktop.
-     */
-    struct desktop desktop;
-
-    if (!desktop_init(
-            &desktop,
-            &graphics,
-            (const uint8_t *)
-                wallpaper_module->address,
-            wallpaper_module->size
-        )) {
-        serial_write(
-            "[FAIL] Invalid desktop wallpaper\n"
-        );
-
-        kernel_halt();
-    }
-
-    desktop_render(
-        &desktop
-    );
-
-    serial_write(
-        "[OK] KRISHNA desktop rendered\n"
-    );
-
-    /*
-     * Initialize the mouse pointer only after the desktop has
-     * finished drawing. This ensures it saves the correct
-     * desktop pixels underneath itself.
-     */
-    struct mouse_cursor pointer;
-
-    if (!mouse_cursor_init(
-            &pointer,
-            &graphics,
-            (const uint8_t *)
-                cursor_module->address,
-            cursor_module->size
-        )) {
-        serial_write(
-            "[FAIL] Invalid KRISHNA cursor asset\n"
-        );
-
-        kernel_halt();
-    }
-
-    mouse_cursor_show(
-        &pointer
-    );
-
-    serial_write(
-        "[OK] KRISHNA pointer displayed\n"
-    );
-
-    enum interface_mode {
-        INTERFACE_DESKTOP,
-        INTERFACE_TERMINAL
-    };
-
-    enum interface_mode mode =
-        INTERFACE_DESKTOP;
-
-    struct console console;
-    struct shell shell;
-
-    uint64_t next_cursor_toggle =
-        local_apic_timer_ticks() + cursor_interval;
-
-    bool previous_left_button =
-        false;
-
-    struct mouse_event mouse_event;
-
-    /*
-     * KRISHNA OS desktop event loop.
-     *
-     * Both PS/2 devices must be polled because they share the
-     * controller output buffer.
-     */
-    for (;;) {
-        bool key_available =
-            keyboard_poll(&key_event);
-
-        bool mouse_available =
-            mouse_poll(&mouse_event);
-
-        kernel_thread_preemption_point();
-
-        /*
-         * Move the pointer in either interface mode.
-         */
-        if (mouse_available) {
-            mouse_cursor_move(
-                &pointer,
-                mouse_event.delta_x,
-                mouse_event.delta_y
-            );
-
-            /*
-             * Detect only the transition from released to pressed.
-             * This prevents one click from launching repeatedly.
-             */
-            bool left_clicked =
-                mouse_event.left_button &&
-                !previous_left_button;
-
-            previous_left_button =
-                mouse_event.left_button;
-
-            if (mode == INTERFACE_DESKTOP &&
-                left_clicked &&
-                desktop_terminal_contains(
-                    &desktop,
-                    pointer.x + 2,
-                    pointer.y + 2
-                )) {
-                /*
-                 * Remove the pointer before replacing the desktop.
-                 */
-                mouse_cursor_hide(
-                    &pointer
-                );
-
-                if (!console_init(
-                        &console,
-                        &graphics,
-                        (const uint8_t *)
-                            font_module->address,
-                        font_module->size
-                    )) {
-                    serial_write(
-                        "[FAIL] Unable to open terminal\n"
-                    );
-
-                    kernel_halt();
-                }
-
-                console_write(
-                    &console,
-                    "KRISHNA TERMINAL\n"
-                );
-
-                console_write(
-                    &console,
-                    "================\n\n"
-                );
-
-                console_write(
-                    &console,
-                    "Welcome to KRISHNA OS.\n"
-                );
-
-                console_write(
-                    &console,
-                    "Press Escape to return to the desktop.\n\n"
-                );
-
-                shell_init(
-                    &shell,
-                    &console,
-                    memory.usable_bytes
-                );
-
-                console_set_cursor_visible(
-                    &console,
-                    true
-                );
-
-                mode =
-                    INTERFACE_TERMINAL;
-
-                next_cursor_toggle =
-                    local_apic_timer_ticks() +
-                    cursor_interval;
-
-                mouse_cursor_show(
-                    &pointer
-                );
-
-                serial_write(
-                    "[OK] Terminal application opened\n"
-                );
-            }
-        }
-
-        /*
-         * Terminal keyboard handling.
-         */
-        if (mode == INTERFACE_TERMINAL &&
-            key_available &&
-            key_event.pressed) {
-            /*
-             * Escape scancode in PS/2 Set 1 is 0x01.
-             */
-            if (key_event.scancode == 0x01) {
-                mouse_cursor_hide(
-                    &pointer
-                );
-
-                desktop_render(
-                    &desktop
-                );
-
-                mode =
-                    INTERFACE_DESKTOP;
-
-                mouse_cursor_show(
-                    &pointer
-                );
-
-                serial_write(
-                    "[OK] Returned to desktop\n"
-                );
-            } else if (
-                key_event.character != '\0'
-            ) {
-                mouse_cursor_hide(
-                    &pointer
-                );
-
-                /*
-                 * Preserve the serial developer mirror.
-                 */
-                if (key_event.character == '\b') {
-                    serial_write("\b \b");
-                } else {
-                    serial_write_character(
-                        key_event.character
-                    );
-                }
-
-                shell_handle_character(
-                    &shell,
-                    key_event.character
-                );
-
-                console_set_cursor_visible(
-                    &console,
-                    true
-                );
-
-                next_cursor_toggle =
-                    local_apic_timer_ticks() +
-                    cursor_interval;
-
-                mouse_cursor_show(
-                    &pointer
-                );
-            }
-        }
-
-        /*
-         * Blink the text cursor only while the terminal is open.
-         */
-        if (mode == INTERFACE_TERMINAL) {
-            uint64_t now =
-                local_apic_timer_ticks();
-
-            if ((int64_t)(
-                    now -
-                    next_cursor_toggle
-                ) >= 0) {
-                mouse_cursor_hide(
-                    &pointer
-                );
-
-                console_set_cursor_visible(
-                    &console,
-                    !console.cursor_visible
-                );
-
-                mouse_cursor_show(
-                    &pointer
-                );
-
-                next_cursor_toggle =
-                    now +
-                    cursor_interval;
-            }
-        }
-
-        __asm__ volatile ("pause");
-    }
+    kernel_halt();
+}
+
+serial_write(
+    "[OK] Ring-3 desktop process started\n"
+);
+
+/*
+ * The bootstrap thread now acts as an idle/reaper context.
+ * Rendering and input processing belong to Ring 3.
+ */
+for (;;) {
+    kernel_thread_yield();
+    kernel_thread_preemption_point();
+}
 }

@@ -59,6 +59,7 @@ TEST_CFILES := \
 
 DESKTOP_CFILES := \
 	lib/graphics.c \
+	apps/desktop/frontend.c \
 	apps/desktop/main.c
 
 DESKTOP_ASFILES := \

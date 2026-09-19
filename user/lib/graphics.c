@@ -17,6 +17,239 @@ static volatile uint32_t *pixel_address(
         );
 }
 
+static uint8_t rounded_rectangle_coverage(
+    uint64_t pixel_x,
+    uint64_t pixel_y,
+    uint64_t rectangle_x,
+    uint64_t rectangle_y,
+    uint64_t width,
+    uint64_t height,
+    uint64_t radius
+)
+{
+    if (width == 0 || height == 0) {
+        return 0;
+    }
+
+    uint64_t maximum_radius =
+        width < height
+            ? width / 2
+            : height / 2;
+
+    if (radius > maximum_radius) {
+        radius = maximum_radius;
+    }
+
+    if (radius == 0) {
+        return 4;
+    }
+
+    /*
+     * Coordinates use quarter-pixel units. Each real pixel is tested
+     * at four subpixel positions:
+     *
+     *     (0.25, 0.25)  (0.75, 0.25)
+     *     (0.25, 0.75)  (0.75, 0.75)
+     */
+    uint64_t left =
+        rectangle_x * 4;
+
+    uint64_t top =
+        rectangle_y * 4;
+
+    uint64_t right =
+        (rectangle_x + width) * 4;
+
+    uint64_t bottom =
+        (rectangle_y + height) * 4;
+
+    uint64_t radius_4 =
+        radius * 4;
+
+    uint64_t inner_left =
+        left + radius_4;
+
+    uint64_t inner_right =
+        right - radius_4;
+
+    uint64_t inner_top =
+        top + radius_4;
+
+    uint64_t inner_bottom =
+        bottom - radius_4;
+
+    static const uint64_t sample_offsets[2] = {
+        UINT64_C(1),
+        UINT64_C(3)
+    };
+
+    uint8_t coverage = 0;
+
+    for (uint8_t sample_y = 0;
+         sample_y < 2;
+         sample_y++) {
+        for (uint8_t sample_x = 0;
+             sample_x < 2;
+             sample_x++) {
+            uint64_t x =
+                pixel_x * 4 +
+                sample_offsets[sample_x];
+
+            uint64_t y =
+                pixel_y * 4 +
+                sample_offsets[sample_y];
+
+            if (x < left ||
+                x >= right ||
+                y < top ||
+                y >= bottom) {
+                continue;
+            }
+
+            /*
+             * The horizontal and vertical middle sections are always
+             * inside the rounded rectangle.
+             */
+            if ((x >= inner_left &&
+                 x < inner_right) ||
+                (y >= inner_top &&
+                 y < inner_bottom)) {
+                coverage++;
+                continue;
+            }
+
+            uint64_t center_x =
+                x < inner_left
+                    ? inner_left
+                    : inner_right;
+
+            uint64_t center_y =
+                y < inner_top
+                    ? inner_top
+                    : inner_bottom;
+
+            int64_t delta_x =
+                (int64_t)x -
+                (int64_t)center_x;
+
+            int64_t delta_y =
+                (int64_t)y -
+                (int64_t)center_y;
+
+            int64_t radius_squared =
+                (int64_t)radius_4 *
+                (int64_t)radius_4;
+
+            if (delta_x * delta_x +
+                    delta_y * delta_y <=
+                radius_squared) {
+                coverage++;
+            }
+        }
+    }
+
+    return coverage;
+}
+
+void graphics_rounded_rectangle(
+    struct graphics_context *graphics,
+    uint64_t x,
+    uint64_t y,
+    uint64_t width,
+    uint64_t height,
+    uint64_t radius,
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue,
+    uint8_t alpha
+)
+{
+    if (graphics == NULL ||
+        width == 0 ||
+        height == 0 ||
+        alpha == 0) {
+        return;
+    }
+
+    /*
+     * Clamp the drawing bounds before iterating. This prevents the
+     * loops from attempting to draw past the framebuffer.
+     */
+    if (x >= graphics->info.width ||
+        y >= graphics->info.height) {
+        return;
+    }
+
+    uint64_t clipped_width =
+        width;
+
+    uint64_t clipped_height =
+        height;
+
+    if (clipped_width >
+        graphics->info.width - x) {
+        clipped_width =
+            graphics->info.width - x;
+    }
+
+    if (clipped_height >
+        graphics->info.height - y) {
+        clipped_height =
+            graphics->info.height - y;
+    }
+
+    for (uint64_t row = 0;
+         row < clipped_height;
+         row++) {
+        for (uint64_t column = 0;
+             column < clipped_width;
+             column++) {
+            uint8_t coverage =
+                rounded_rectangle_coverage(
+                    x + column,
+                    y + row,
+                    x,
+                    y,
+                    width,
+                    height,
+                    radius
+                );
+
+            if (coverage == 0) {
+                continue;
+            }
+
+            /*
+             * Convert four-sample coverage into the final alpha:
+             *
+             * coverage 1 = 25%
+             * coverage 2 = 50%
+             * coverage 3 = 75%
+             * coverage 4 = 100%
+             */
+            uint8_t final_alpha =
+                (uint8_t)(
+                    (
+                        (uint32_t)alpha *
+                        coverage +
+                        UINT32_C(2)
+                    ) /
+                    UINT32_C(4)
+                );
+
+            graphics_blend_pixel(
+                graphics,
+                x + column,
+                y + row,
+                red,
+                green,
+                blue,
+                final_alpha
+            );
+        }
+    }
+}
+
 bool graphics_init(
     struct graphics_context *graphics,
     void *address,
@@ -284,86 +517,45 @@ void graphics_blit_rgba(
     }
 }
 
-void graphics_rounded_rectangle(
-    struct graphics_context *graphics,
-    uint64_t x,
-    uint64_t y,
-    uint64_t width,
-    uint64_t height,
-    uint64_t radius,
-    uint8_t red,
-    uint8_t green,
-    uint8_t blue,
-    uint8_t alpha
+bool graphics_present(
+    struct graphics_context *destination,
+    const struct graphics_context *source
 )
 {
-    if (width == 0 || height == 0) {
-        return;
+    if (destination == NULL ||
+        source == NULL ||
+        destination->info.width !=
+            source->info.width ||
+        destination->info.height !=
+            source->info.height ||
+        destination->info.bits_per_pixel != 32 ||
+        source->info.bits_per_pixel != 32) {
+        return false;
     }
 
-    if (radius > width / 2) {
-        radius = width / 2;
-    }
+    for (uint64_t y = 0;
+         y < source->info.height;
+         y++) {
+        volatile uint32_t *destination_row =
+            (volatile uint32_t *)(void *)(
+                destination->address +
+                y * destination->info.pitch
+            );
 
-    if (radius > height / 2) {
-        radius = height / 2;
-    }
-
-    for (uint64_t py = 0;
-         py < height;
-         py++) {
-        for (uint64_t px = 0;
-             px < width;
-             px++) {
-            int64_t distance_x = 0;
-            int64_t distance_y = 0;
-
-            if (px < radius) {
-                distance_x =
-                    (int64_t)radius -
-                    (int64_t)px;
-            } else if (
-                px >= width - radius
-            ) {
-                distance_x =
-                    (int64_t)px -
-                    (int64_t)(
-                        width - radius - 1
-                    );
-            }
-
-            if (py < radius) {
-                distance_y =
-                    (int64_t)radius -
-                    (int64_t)py;
-            } else if (
-                py >= height - radius
-            ) {
-                distance_y =
-                    (int64_t)py -
-                    (int64_t)(
-                        height - radius - 1
-                    );
-            }
-
-            bool inside =
-                distance_x * distance_x +
-                distance_y * distance_y <=
-                (int64_t)(
-                    radius * radius
+        const volatile uint32_t *source_row =
+            (const volatile uint32_t *)
+                (const void *)(
+                    source->address +
+                    y * source->info.pitch
                 );
 
-            if (inside) {
-                graphics_blend_pixel(
-                    graphics,
-                    x + px,
-                    y + py,
-                    red,
-                    green,
-                    blue,
-                    alpha
-                );
-            }
+        for (uint64_t x = 0;
+             x < source->info.width;
+             x++) {
+            destination_row[x] =
+                source_row[x];
         }
     }
+
+    return true;
 }
