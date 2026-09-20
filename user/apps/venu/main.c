@@ -10,6 +10,8 @@
 
 #include "lexer.h"
 
+static int last_status;
+
 static bool text_equal(
     const char *left,
     const char *right
@@ -48,10 +50,99 @@ static size_t text_length(const char *text)
     return length;
 }
 
+static bool send_message(
+    const struct venu_message *message,
+    size_t size
+)
+{
+    for (;;) {
+        int64_t result =
+            krishna_channel_send(
+                KRISHNA_HANDLE_APPLICATION_CHANNEL,
+                message,
+                size
+            );
+
+        if (result == (int64_t)size) {
+            return true;
+        }
+
+        if (result !=
+            -KRISHNA_ERROR_WOULD_BLOCK) {
+            return false;
+        }
+
+        (void)krishna_yield();
+    }
+}
+
+static bool send_control(
+    uint32_t type,
+    uint32_t value
+)
+{
+    struct venu_message message = {
+        .type = type,
+        .length = value,
+        .text = {0}
+    };
+
+    return send_message(
+        &message,
+        offsetof(
+            struct venu_message,
+            text
+        )
+    );
+}
+
+static void write_bytes(
+    const char *text,
+    size_t length
+)
+{
+    size_t position = 0;
+
+    while (position < length) {
+        size_t chunk = length - position;
+
+        if (chunk >
+            VENU_PROTOCOL_TEXT_CAPACITY) {
+            chunk =
+                VENU_PROTOCOL_TEXT_CAPACITY;
+        }
+
+        struct venu_message message = {
+            .type = VENU_MESSAGE_OUTPUT,
+            .length = (uint32_t)chunk,
+            .text = {0}
+        };
+
+        for (size_t index = 0;
+             index < chunk;
+             index++) {
+            message.text[index] =
+                text[position + index];
+        }
+
+        if (!send_message(
+                &message,
+                offsetof(
+                    struct venu_message,
+                    text
+                ) +
+                chunk
+            )) {
+            return;
+        }
+
+        position += chunk;
+    }
+}
+
 static void write_text(const char *text)
 {
-    (void)krishna_write(
-        KRISHNA_STDOUT,
+    write_bytes(
         text,
         text_length(text)
     );
@@ -60,7 +151,15 @@ static void write_text(const char *text)
 static void write_line(const char *text)
 {
     write_text(text);
-    write_text("\n");
+    write_bytes("\n", 1);
+}
+
+static void clear_terminal(void)
+{
+    (void)send_control(
+        VENU_MESSAGE_CLEAR,
+        0
+    );
 }
 
 static size_t unsigned_to_text(
@@ -81,8 +180,10 @@ static size_t unsigned_to_text(
             (char)('0' + value % 10);
 
         value /= 10;
-    } while (value != 0 &&
-             count < sizeof(reversed));
+    } while (
+        value != 0 &&
+        count < sizeof(reversed)
+    );
 
     if (count + 1 > capacity) {
         return 0;
@@ -143,89 +244,63 @@ static int command_help(
     const struct venu_token_list *tokens
 )
 {
-    if (tokens->count == 2) {
-        const char *name =
-            tokens->tokens[1].text;
-
-        if (text_equal(name, "echo")) {
-            write_line(
-                "usage: echo [arguments...]"
-            );
-
-            write_line(
-                "Print arguments separated by spaces."
-            );
-
-            return 0;
-        }
-
-        if (text_equal(name, "sleep")) {
-            write_line(
-                "usage: sleep <milliseconds>"
-            );
-
-            write_line(
-                "Pause VENU for the requested duration."
-            );
-
-            return 0;
-        }
-
-        write_text(
-            "venu: help: unknown command: "
-        );
-
-        write_line(name);
-        return 1;
-    }
-
     if (tokens->count > 2) {
-        write_line(
-            "usage: help [command]"
-        );
-
+        write_line("usage: help [command]");
         return 2;
     }
 
-    write_line(
-        "VENU - Versatile Execution and Navigation Utility"
-    );
+    if (tokens->count == 2) {
+        const char *command =
+            tokens->tokens[1].text;
 
-    write_line(
-        "Available commands:"
-    );
+        if (text_equal(command, "help")) {
+            write_line("usage: help [command]");
+            write_line("Display available commands or command help.");
+            return 0;
+        }
 
-    write_line(
-        "  help [command]       Show command help"
-    );
+        if (text_equal(command, "echo")) {
+            write_line("usage: echo [arguments...]");
+            write_line("Print arguments separated by spaces.");
+            return 0;
+        }
 
-    write_line(
-        "  echo [arguments...]   Print arguments"
-    );
+        if (text_equal(command, "sleep")) {
+            write_line("usage: sleep <milliseconds>");
+            write_line("Pause VENU for the requested duration.");
+            return 0;
+        }
 
-    write_line(
-        "  about                 About KRISHNA OS"
-    );
+        if (text_equal(command, "clear")) {
+            write_line("usage: clear");
+            write_line("Clear graphical terminal output.");
+            return 0;
+        }
 
-    write_line(
-        "  version               Show VENU version"
-    );
+        if (text_equal(command, "status")) {
+            write_line("usage: status");
+            write_line("Display the previous command status.");
+            return 0;
+        }
 
-    write_line(
-        "  pid                   Show shell process ID"
-    );
+        write_text("venu: help: unknown command: ");
+        write_line(command);
+        return 1;
+    }
 
-    write_line(
-        "  sleep <milliseconds>  Pause the shell"
-    );
-
-    write_line(
-        "  true                  Return success"
-    );
-
-    write_line(
-        "  false                 Return failure"
-    );
+    write_line("VENU - Versatile Execution and Navigation Utility");
+    write_line("");
+    write_line("Available commands:");
+    write_line("  help [command]       Show command help");
+    write_line("  echo [arguments...]   Print arguments");
+    write_line("  clear                 Clear the terminal");
+    write_line("  status                Show previous command status");
+    write_line("  about                 About KRISHNA OS");
+    write_line("  version               Show VENU version");
+    write_line("  pid                   Show shell process ID");
+    write_line("  sleep <milliseconds>  Pause the shell");
+    write_line("  true                  Return success");
+    write_line("  false                 Return failure");
 
     return 0;
 }
@@ -246,7 +321,49 @@ static int command_echo(
         );
     }
 
-    write_text("\n");
+    write_bytes("\n", 1);
+    return 0;
+}
+
+static int command_clear(
+    const struct venu_token_list *tokens
+)
+{
+    if (tokens->count != 1) {
+        write_line("usage: clear");
+        return 2;
+    }
+
+    clear_terminal();
+    return 0;
+}
+
+static int command_status(
+    const struct venu_token_list *tokens
+)
+{
+    if (tokens->count != 1) {
+        write_line("usage: status");
+        return 2;
+    }
+
+    char number[32];
+
+    if (unsigned_to_text(
+            (uint64_t)last_status,
+            number,
+            sizeof(number)
+        ) == 0) {
+        write_line(
+            "venu: status conversion failed"
+        );
+
+        return 1;
+    }
+
+    write_text("Previous command status: ");
+    write_line(number);
+
     return 0;
 }
 
@@ -279,7 +396,7 @@ static int command_version(
         return 2;
     }
 
-    write_line("VENU 0.1.0");
+    write_line("VENU 0.2.0");
     write_line("KRISHNA userspace ABI 0");
 
     return 0;
@@ -371,15 +488,15 @@ static int execute_line(
 {
     struct venu_token_list tokens;
 
-    enum venu_lexer_result lex_result =
+    enum venu_lexer_result result =
         venu_lex(
             line,
             length,
             &tokens
         );
 
-    if (lex_result != VENU_LEXER_OK) {
-        switch (lex_result) {
+    if (result != VENU_LEXER_OK) {
+        switch (result) {
             case VENU_LEXER_TOO_MANY_TOKENS:
                 write_line(
                     "venu: too many tokens"
@@ -429,6 +546,14 @@ static int execute_line(
         return command_echo(&tokens);
     }
 
+    if (text_equal(command, "clear")) {
+        return command_clear(&tokens);
+    }
+
+    if (text_equal(command, "status")) {
+        return command_status(&tokens);
+    }
+
     if (text_equal(command, "about")) {
         return command_about(&tokens);
     }
@@ -446,11 +571,21 @@ static int execute_line(
     }
 
     if (text_equal(command, "true")) {
-        return tokens.count == 1 ? 0 : 2;
+        if (tokens.count != 1) {
+            write_line("usage: true");
+            return 2;
+        }
+
+        return 0;
     }
 
     if (text_equal(command, "false")) {
-        return tokens.count == 1 ? 1 : 2;
+        if (tokens.count != 1) {
+            write_line("usage: false");
+            return 2;
+        }
+
+        return 1;
     }
 
     write_text("venu: command not found: ");
@@ -461,41 +596,39 @@ static int execute_line(
 
 static void send_pong(void)
 {
-    struct venu_message message = {
-        .type = VENU_MESSAGE_PONG,
-        .length = 0,
-        .text = {0}
-    };
+    (void)send_control(
+        VENU_MESSAGE_PONG,
+        0
+    );
+}
 
-    for (;;) {
-        int64_t result =
-            krishna_channel_send(
-                KRISHNA_HANDLE_APPLICATION_CHANNEL,
-                &message,
-                offsetof(
-                    struct venu_message,
-                    text
-                )
-            );
+static void send_complete(int status)
+{
+    (void)send_control(
+        VENU_MESSAGE_COMPLETE,
+        (uint32_t)status
+    );
+}
 
-        if (result >= 0) {
-            return;
-        }
-
-        if (result !=
-            -KRISHNA_ERROR_WOULD_BLOCK) {
-            return;
-        }
-
-        (void)krishna_yield();
-    }
+static void serial_log(
+    const char *text
+)
+{
+    (void)krishna_write(
+        KRISHNA_STDOUT,
+        text,
+        text_length(text)
+    );
 }
 
 int main(void)
 {
-    write_line(
-        "[VENU] shell process started"
+    serial_log(
+        "[VENU] shell process started\n"
     );
+
+    last_status = 0;
+    bool greeted = false;
 
     for (;;) {
         struct venu_message message;
@@ -514,37 +647,70 @@ int main(void)
         }
 
         if (result < 0) {
-            write_line(
-                "[VENU] shell channel failed"
+            serial_log(
+                "[VENU] shell channel failed\n"
             );
 
             krishna_exit(1);
         }
 
-        if (message.type ==
-            VENU_MESSAGE_PING) {
-            send_pong();
+        size_t header_size =
+            offsetof(
+                struct venu_message,
+                text
+            );
+
+        if ((size_t)result < header_size) {
             continue;
         }
 
         if (message.type ==
-            VENU_MESSAGE_LINE) {
-            if (message.length >=
-                VENU_PROTOCOL_TEXT_CAPACITY) {
+            VENU_MESSAGE_PING) {
+            send_pong();
+
+            if (!greeted) {
                 write_line(
-                    "venu: submitted line is too long"
+                    "Welcome to KRISHNA OS."
                 );
 
-                continue;
+                write_line(
+                    "VENU 0.2 is ready. Type 'help' for commands."
+                );
+
+                send_complete(0);
+                greeted = true;
             }
 
-            message.text[message.length] =
-                '\0';
+            continue;
+        }
 
-            (void)execute_line(
+        if (message.type !=
+            VENU_MESSAGE_LINE) {
+            continue;
+        }
+
+        if (message.length >=
+                VENU_PROTOCOL_TEXT_CAPACITY ||
+            (size_t)result <
+                header_size +
+                message.length) {
+            write_line(
+                "venu: submitted line is invalid"
+            );
+
+            last_status = 2;
+            send_complete(last_status);
+            continue;
+        }
+
+        message.text[message.length] = '\0';
+
+        last_status =
+            execute_line(
                 message.text,
                 message.length
             );
-        }
+
+        send_complete(last_status);
     }
 }

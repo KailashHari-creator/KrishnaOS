@@ -9,6 +9,8 @@
 #include <krishna/abi.h>
 
 #define DESKTOP_TERMINAL_INPUT_CAPACITY 256
+#define DESKTOP_TERMINAL_SCROLLBACK_LINES 64
+#define DESKTOP_TERMINAL_LINE_CAPACITY    96
 
 enum desktop_frontend_action {
     DESKTOP_FRONTEND_ACTION_NONE,
@@ -44,6 +46,23 @@ struct desktop_frontend {
     ];
 
     size_t terminal_input_length;
+
+        char terminal_lines[
+        DESKTOP_TERMINAL_SCROLLBACK_LINES
+    ][
+        DESKTOP_TERMINAL_LINE_CAPACITY + 1
+    ];
+
+    size_t terminal_line_count;
+
+    char terminal_partial[
+        DESKTOP_TERMINAL_LINE_CAPACITY + 1
+    ];
+
+    size_t terminal_partial_length;
+
+    bool terminal_ready;
+    bool terminal_show_art;
 };
 
 bool desktop_frontend_initialize(
@@ -81,6 +100,21 @@ bool desktop_frontend_set_terminal_input(
     struct desktop_frontend *desktop,
     const char *text,
     size_t length
+);
+
+bool desktop_frontend_append_terminal_output(
+    struct desktop_frontend *desktop,
+    const char *text,
+    size_t length
+);
+
+bool desktop_frontend_clear_terminal(
+    struct desktop_frontend *desktop
+);
+
+bool desktop_frontend_set_terminal_ready(
+    struct desktop_frontend *desktop,
+    bool ready
 );
 
 #endif

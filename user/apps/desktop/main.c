@@ -821,19 +821,43 @@ int main(void)
         * Receive state updates and control replies from the terminal
         * process.
         */
-        if (terminal_channel !=
+                if (terminal_channel !=
             KRISHNA_HANDLE_INVALID) {
-            struct terminal_message message;
+            bool terminal_changed = false;
 
-            int64_t receive_result =
-                krishna_channel_receive(
-                    terminal_channel,
-                    &message,
-                    sizeof(message)
-                );
+            for (;;) {
+                struct terminal_message message;
 
-            if (receive_result > 0) {
+                int64_t receive_result =
+                    krishna_channel_receive(
+                        terminal_channel,
+                        &message,
+                        sizeof(message)
+                    );
+
+                if (receive_result ==
+                    -KRISHNA_ERROR_WOULD_BLOCK) {
+                    break;
+                }
+
+                if (receive_result < 0) {
+                    DESKTOP_FAILURE(
+                        "[DESKTOP] terminal IPC receive failed\n"
+                    );
+                }
+
                 handled_event = true;
+
+                size_t header_size =
+                    offsetof(
+                        struct terminal_message,
+                        payload
+                    );
+
+                if ((size_t)receive_result <
+                    header_size) {
+                    continue;
+                }
 
                 if (message.type ==
                     TERMINAL_MESSAGE_PONG) {
@@ -843,46 +867,94 @@ int main(void)
                             "[OK] terminal process and IPC channel verified\n"
                         ) - 1
                     );
-                } else if (
-                    message.type ==
-                        TERMINAL_MESSAGE_STATE &&
-                    message.length <
-                        TERMINAL_PROTOCOL_TEXT_CAPACITY
-                ) {
-                    bool input_changed =
+
+                    continue;
+                }
+
+                if (message.type ==
+                    TERMINAL_MESSAGE_STATE) {
+                    if (message.length >=
+                            TERMINAL_PROTOCOL_TEXT_CAPACITY ||
+                        (size_t)receive_result <
+                            offsetof(
+                                struct terminal_message,
+                                payload.text
+                            ) +
+                            message.length) {
+                        continue;
+                    }
+
+                    terminal_changed |=
                         desktop_frontend_set_terminal_input(
                             &desktop,
                             message.payload.text,
                             message.length
                         );
 
-                    if (input_changed &&
-                        desktop.terminal_open) {
-                        cursor_hide(&cursor);
+                    continue;
+                }
 
-                        desktop_frontend_render(
+                if (message.type ==
+                    TERMINAL_MESSAGE_OUTPUT) {
+                    if (message.length >
+                            TERMINAL_PROTOCOL_TEXT_CAPACITY ||
+                        (size_t)receive_result <
+                            offsetof(
+                                struct terminal_message,
+                                payload.text
+                            ) +
+                            message.length) {
+                        continue;
+                    }
+
+                    terminal_changed |=
+                        desktop_frontend_append_terminal_output(
+                            &desktop,
+                            message.payload.text,
+                            message.length
+                        );
+
+                    continue;
+                }
+
+                if (message.type ==
+                    TERMINAL_MESSAGE_CLEAR) {
+                    terminal_changed |=
+                        desktop_frontend_clear_terminal(
                             &desktop
                         );
 
-                        if (!graphics_present(
-                                &graphics,
-                                &desktop_graphics
-                            )) {
-                            DESKTOP_FAILURE(
-                                "[DESKTOP] terminal state presentation failed\n"
-                            );
-                        }
-
-                        cursor_show(&cursor);
-                    }
+                    continue;
                 }
-            } else if (
-                receive_result !=
-                    -KRISHNA_ERROR_WOULD_BLOCK
-            ) {
-                DESKTOP_FAILURE(
-                    "[DESKTOP] terminal IPC receive failed\n"
+
+                if (message.type ==
+                    TERMINAL_MESSAGE_READY) {
+                    terminal_changed |=
+                        desktop_frontend_set_terminal_ready(
+                            &desktop,
+                            message.length != 0
+                        );
+                }
+            }
+
+            if (terminal_changed &&
+                desktop.terminal_open) {
+                cursor_hide(&cursor);
+
+                desktop_frontend_render(
+                    &desktop
                 );
+
+                if (!graphics_present(
+                        &graphics,
+                        &desktop_graphics
+                    )) {
+                    DESKTOP_FAILURE(
+                        "[DESKTOP] terminal state presentation failed\n"
+                    );
+                }
+
+                cursor_show(&cursor);
             }
         }
 

@@ -868,9 +868,6 @@ static void draw_terminal_window(
         24
     );
 
-    /*
-     * Window controls.
-     */
     draw_filled_circle(
         graphics,
         TERMINAL_WINDOW_X + 26,
@@ -915,13 +912,9 @@ static void draw_terminal_window(
         255
     );
 
-    /*
-     * Anchor the prompt to the bottom of the terminal. Future command
-     * output should grow upward from this position.
-     */
     const uint64_t bottom_padding = 24;
 
-    uint64_t prompt_x =
+    uint64_t content_x =
         TERMINAL_WINDOW_X + 30;
 
     uint64_t prompt_y =
@@ -931,121 +924,155 @@ static void draw_terminal_window(
         desktop->font.glyph_height;
 
     uint64_t line_spacing =
-        desktop->font.glyph_height + 14;
+        desktop->font.glyph_height + 10;
 
-    uint64_t information_y =
-        prompt_y - line_spacing;
+    int64_t output_y =
+        (int64_t)prompt_y -
+        (int64_t)line_spacing;
 
-    uint64_t welcome_y =
-        information_y - line_spacing;
+    int64_t minimum_output_y =
+        (int64_t)TERMINAL_WINDOW_Y + 62;
 
-    /*
-     * Place the artwork immediately above the startup messages.
-     */
-    uint64_t art_x =
-        TERMINAL_WINDOW_X +
-        (
-            TERMINAL_WINDOW_WIDTH -
-            TERMINAL_ART_WIDTH
-        ) / 2;
+    if (desktop->terminal_partial_length != 0 &&
+        output_y >= minimum_output_y) {
+        draw_text(
+            desktop,
+            content_x,
+            (uint64_t)output_y,
+            desktop->terminal_partial,
+            215,
+            240,
+            248,
+            255
+        );
 
-    uint64_t art_y =
-        welcome_y -
-        TERMINAL_ART_HEIGHT -
-        18;
-
-    uint64_t minimum_art_y =
-        TERMINAL_WINDOW_Y + 62;
-
-    if (art_y < minimum_art_y) {
-        art_y = minimum_art_y;
+        output_y -=
+            (int64_t)line_spacing;
     }
 
-    graphics_blit_rgba(
-        graphics,
-        art_x,
-        art_y,
-        krishna_terminal_art_start,
-        TERMINAL_ART_WIDTH,
-        TERMINAL_ART_HEIGHT
-    );
+    size_t remaining =
+        desktop->terminal_line_count;
 
-    draw_text(
-        desktop,
-        prompt_x,
-        welcome_y,
-        "Welcome to KRISHNA OS.",
-        215,
-        240,
-        248,
-        255
-    );
+    while (remaining != 0 &&
+           output_y >= minimum_output_y) {
+        remaining--;
 
-    draw_text(
-        desktop,
-        prompt_x,
-        information_y,
-        "The terminal frontend is running in Ring 3.",
-        110,
-        210,
-        240,
-        230
-    );
+        const char *line =
+            desktop->terminal_lines[
+                remaining
+            ];
 
-    draw_text(
-        desktop,
-        prompt_x,
-        prompt_y,
-        prompt,
-        65,
-        235,
-        245,
-        255
-    );
+        bool prompt_line = true;
 
-    uint64_t input_x =
-        prompt_x +
-        text_width(desktop, prompt);
+        for (size_t index = 0;
+             prompt[index] != '\0';
+             index++) {
+            if (line[index] !=
+                prompt[index]) {
+                prompt_line = false;
+                break;
+            }
+        }
 
-    draw_text(
-        desktop,
-        input_x,
-        prompt_y,
-        desktop->terminal_input,
-        225,
-        242,
-        248,
-        255
-    );
+        if (prompt_line) {
+            draw_text(
+                desktop,
+                content_x,
+                (uint64_t)output_y,
+                line,
+                75,
+                230,
+                245,
+                255
+            );
+        } else {
+            draw_text(
+                desktop,
+                content_x,
+                (uint64_t)output_y,
+                line,
+                215,
+                240,
+                248,
+                255
+            );
+        }
 
-    /*
-     * Position the cursor from the actual prompt width rather than
-     * using a hard-coded coordinate.
-     */
-    uint64_t cursor_x =
-        input_x +
-        text_width(
+        output_y -=
+            (int64_t)line_spacing;
+    }
+
+    if (desktop->terminal_show_art &&
+        desktop->terminal_line_count <= 2) {
+        uint64_t art_x =
+            TERMINAL_WINDOW_X +
+            (
+                TERMINAL_WINDOW_WIDTH -
+                TERMINAL_ART_WIDTH
+            ) / 2;
+
+        uint64_t art_y =
+            TERMINAL_WINDOW_Y + 62;
+
+        graphics_blit_rgba(
+            graphics,
+            art_x,
+            art_y,
+            krishna_terminal_art_start,
+            TERMINAL_ART_WIDTH,
+            TERMINAL_ART_HEIGHT
+        );
+    }
+
+    if (desktop->terminal_ready) {
+        draw_text(
             desktop,
-            desktop->terminal_input
-        ) +
-        4;
+            content_x,
+            prompt_y,
+            prompt,
+            65,
+            235,
+            245,
+            255
+        );
 
-    graphics_rounded_rectangle(
-        graphics,
-        cursor_x,
-        prompt_y,
-        9,
-        desktop->font.glyph_height,
-        2,
-        250,
-        199,
-        55,
-        255
-    );
+        uint64_t input_x =
+            content_x +
+            text_width(desktop, prompt);
 
-    /*
-     * Scrollbar track.
-     */
+        draw_text(
+            desktop,
+            input_x,
+            prompt_y,
+            desktop->terminal_input,
+            225,
+            242,
+            248,
+            255
+        );
+
+        uint64_t cursor_x =
+            input_x +
+            text_width(
+                desktop,
+                desktop->terminal_input
+            ) +
+            4;
+
+        graphics_rounded_rectangle(
+            graphics,
+            cursor_x,
+            prompt_y,
+            9,
+            desktop->font.glyph_height,
+            2,
+            250,
+            199,
+            55,
+            255
+        );
+    }
+
     graphics_rounded_rectangle(
         graphics,
         TERMINAL_WINDOW_X +
@@ -1060,22 +1087,14 @@ static void draw_terminal_window(
         55
     );
 
-    /*
-     * Scrollbar thumb starts at the bottom because this initial view
-     * represents the newest terminal output.
-     */
-    const uint64_t scrollbar_thumb_height = 105;
-
     graphics_rounded_rectangle(
         graphics,
         TERMINAL_WINDOW_X +
             TERMINAL_WINDOW_WIDTH - 18,
         TERMINAL_WINDOW_Y +
-            TERMINAL_WINDOW_HEIGHT -
-            scrollbar_thumb_height -
-            20,
+            TERMINAL_WINDOW_HEIGHT - 125,
         5,
-        scrollbar_thumb_height,
+        105,
         2,
         115,
         225,
@@ -1219,6 +1238,14 @@ bool desktop_frontend_initialize(
 
     desktop->terminal_input[0] = 
         '\0';
+    
+    desktop->terminal_line_count = 0;
+
+    desktop->terminal_partial_length = 0;
+    desktop->terminal_partial[0] = '\0';
+
+    desktop->terminal_ready = false;
+    desktop->terminal_show_art = true;
 
     return true;
 }
@@ -1445,5 +1472,133 @@ bool desktop_frontend_set_terminal_input(
     desktop->terminal_input[length] = '\0';
     desktop->terminal_input_length = length;
 
+    return true;
+}
+static void terminal_commit_partial(
+    struct desktop_frontend *desktop
+)
+{
+    if (desktop->terminal_line_count >=
+        DESKTOP_TERMINAL_SCROLLBACK_LINES) {
+        for (size_t line = 1;
+             line <
+                DESKTOP_TERMINAL_SCROLLBACK_LINES;
+             line++) {
+            for (size_t column = 0;
+                 column <=
+                    DESKTOP_TERMINAL_LINE_CAPACITY;
+                 column++) {
+                desktop->terminal_lines[
+                    line - 1
+                ][column] =
+                    desktop->terminal_lines[
+                        line
+                    ][column];
+            }
+        }
+
+        desktop->terminal_line_count =
+            DESKTOP_TERMINAL_SCROLLBACK_LINES - 1;
+    }
+
+    size_t destination =
+        desktop->terminal_line_count;
+
+    for (size_t index = 0;
+         index <
+            desktop->terminal_partial_length;
+         index++) {
+        desktop->terminal_lines[
+            destination
+        ][index] =
+            desktop->terminal_partial[index];
+    }
+
+    desktop->terminal_lines[
+        destination
+    ][
+        desktop->terminal_partial_length
+    ] = '\0';
+
+    desktop->terminal_line_count++;
+
+    desktop->terminal_partial_length = 0;
+    desktop->terminal_partial[0] = '\0';
+}
+
+bool desktop_frontend_append_terminal_output(
+    struct desktop_frontend *desktop,
+    const char *text,
+    size_t length
+)
+{
+    if (desktop == NULL ||
+        text == NULL ||
+        length == 0) {
+        return false;
+    }
+
+    for (size_t index = 0;
+         index < length;
+         index++) {
+        char character = text[index];
+
+        if (character == '\r') {
+            continue;
+        }
+
+        if (character == '\n') {
+            terminal_commit_partial(desktop);
+            continue;
+        }
+
+        if (desktop->terminal_partial_length >=
+            DESKTOP_TERMINAL_LINE_CAPACITY) {
+            terminal_commit_partial(desktop);
+        }
+
+        desktop->terminal_partial[
+            desktop->terminal_partial_length++
+        ] = character;
+
+        desktop->terminal_partial[
+            desktop->terminal_partial_length
+        ] = '\0';
+    }
+
+    if (desktop->terminal_line_count > 2) {
+        desktop->terminal_show_art = false;
+    }
+
+    return true;
+}
+
+bool desktop_frontend_clear_terminal(
+    struct desktop_frontend *desktop
+)
+{
+    if (desktop == NULL) {
+        return false;
+    }
+
+    desktop->terminal_line_count = 0;
+    desktop->terminal_partial_length = 0;
+    desktop->terminal_partial[0] = '\0';
+    desktop->terminal_show_art = false;
+
+    return true;
+}
+
+bool desktop_frontend_set_terminal_ready(
+    struct desktop_frontend *desktop,
+    bool ready
+)
+{
+    if (desktop == NULL ||
+        desktop->terminal_ready == ready) {
+        return false;
+    }
+
+    desktop->terminal_ready = ready;
     return true;
 }
