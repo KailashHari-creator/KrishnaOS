@@ -68,9 +68,22 @@ DESKTOP_ASFILES := \
 TERMINAL_CFILES := \
 	apps/terminal/main.c
 
+VENU_CFILES := \
+	apps/venu/lexer.c \
+	apps/venu/main.c
+
 COMMON_OBJECTS := \
 	$(addprefix obj/,$(COMMON_CFILES:.c=.c.o)) \
 	$(addprefix obj/,$(COMMON_ASFILES:.S=.S.o))
+
+VENU_CFILES := \
+	apps/venu/lexer.c \
+	apps/venu/main.c
+
+VENU_OBJECTS := \
+	$(COMMON_OBJECTS) \
+	obj/apps/venu/lexer.c.o \
+	obj/apps/venu/main.c.o
 
 TERMINAL_OBJECTS := \
 	$(COMMON_OBJECTS) \
@@ -91,12 +104,15 @@ DEPENDENCIES := \
 	$(addprefix obj/,$(DESKTOP_CFILES:.c=.c.d))
 
 DEPENDENCIES += $(TERMINAL_OBJECTS:.o=.d)
+DEPENDENCIES += \
+	$(addprefix obj/,$(VENU_CFILES:.c=.c.d))
 
 .PHONY: all
 all: \
 	bin/user_test.elf \
 	bin/desktop.elf \
-	bin/terminal.elf
+	bin/terminal.elf \
+	bin/venu.elf
 
 -include $(DEPENDENCIES)
 
@@ -120,6 +136,17 @@ bin/terminal.elf: \
 	GNUmakefile
 	mkdir -p "$(dir $@)"
 	$(LD) $(LDFLAGS) $(TERMINAL_OBJECTS) -o $@
+
+bin/venu.elf: $(VENU_OBJECTS) linker.ld
+	mkdir -p "$(dir $@)"
+	$(LD) -m elf_x86_64 \
+		-nostdlib \
+		-static \
+		-z max-page-size=0x1000 \
+		-z noexecstack \
+		-T linker.ld \
+		$(VENU_OBJECTS) \
+		-o $@
 
 obj/%.c.o: %.c GNUmakefile
 	mkdir -p "$(dir $@)"

@@ -29,4 +29,13 @@ embedded_terminal_elf_start:
     incbin "../user/bin/terminal.elf"
 embedded_terminal_elf_end:
 
+align 16
+
+global embedded_venu_elf_start
+global embedded_venu_elf_end
+
+embedded_venu_elf_start:
+    incbin "../user/bin/venu.elf"
+embedded_venu_elf_end:
+
 section .note.GNU-stack noalloc noexec nowrite progbits

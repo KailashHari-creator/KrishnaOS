@@ -45,6 +45,9 @@ extern const uint8_t embedded_desktop_elf_start[];
 extern const uint8_t embedded_desktop_elf_end[];
 extern const uint8_t embedded_terminal_elf_start[];
 extern const uint8_t embedded_terminal_elf_end[];
+extern const uint8_t embedded_venu_elf_start[];
+extern const uint8_t embedded_venu_elf_end[];
+
 #define USER_APPLICATION_STACK_PAGES ((size_t)16)
 #define USER_APPLICATION_KERNEL_STACK_PAGES ((size_t)4)
 #define USER_APPLICATION_RUNTIME_LIMIT ((size_t)16)
@@ -119,6 +122,9 @@ static bool user_application_find(
     static const char terminal_path[] =
         "/system/bin/terminal";
 
+    static const char venu_path[] =
+        "/system/bin/venu";
+
     if (result == NULL) {
         return false;
     }
@@ -136,6 +142,25 @@ static bool user_application_find(
             embedded_terminal_elf_start;
         result->end =
             embedded_terminal_elf_end;
+        return true;
+    }
+
+    if (user_path_equal(
+            path,
+            path_length,
+            venu_path,
+            sizeof(venu_path) - 1
+        )) {
+        result->path = venu_path;
+        result->path_length =
+            sizeof(venu_path) - 1;
+
+        result->start =
+            embedded_venu_elf_start;
+
+        result->end =
+            embedded_venu_elf_end;
+
         return true;
     }
 
